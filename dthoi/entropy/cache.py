@@ -8,19 +8,27 @@ import torch
 
 @dataclass
 class CacheStats:
+    """Mutable counters describing entropy-cache activity."""
+
     hits: int = 0
     misses: int = 0
     evictions: int = 0
 
 
 class EntropyCache:
-    """Small cache keyed by canonical subset masks.
+    """LRU cache of subset entropies keyed by canonical subset masks.
 
-    Cached tensors are stored on CPU by default so the cache does not silently
-    retain accelerator memory. Values are one entropy per dataset.
+    Parameters
+    ----------
+    max_entries
+        Maximum number of cached subsets. ``None`` disables eviction.
+    store_on_cpu
+        If ``True``, detach cached tensors and store them on CPU so cache growth
+        cannot silently retain accelerator memory.
     """
 
     def __init__(self, max_entries: int | None = None, *, store_on_cpu: bool = True):
+        """Initialize an empty entropy cache."""
         if max_entries is not None and max_entries <= 0:
             raise ValueError("max_entries must be positive or None.")
         self.max_entries = max_entries
@@ -29,6 +37,7 @@ class EntropyCache:
         self.stats = CacheStats()
 
     def get(self, key: int) -> torch.Tensor | None:
+        """Return a cached entropy vector and update LRU/statistics state."""
         value = self._data.get(key)
         if value is None:
             self.stats.misses += 1
@@ -38,10 +47,8 @@ class EntropyCache:
         return value
 
     def put(self, key: int, value: torch.Tensor) -> None:
-        if self.store_on_cpu:
-            value = value.detach().cpu()
-        else:
-            value = value.detach()
+        """Insert or replace one entropy vector and enforce the LRU limit."""
+        value = value.detach().cpu() if self.store_on_cpu else value.detach()
         self._data[key] = value
         self._data.move_to_end(key)
 
@@ -51,7 +58,9 @@ class EntropyCache:
                 self.stats.evictions += 1
 
     def clear(self) -> None:
+        """Remove cached values without resetting accumulated statistics."""
         self._data.clear()
 
     def __len__(self) -> int:
+        """Return the number of currently cached subsets."""
         return len(self._data)
