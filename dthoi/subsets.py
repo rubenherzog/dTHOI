@@ -47,15 +47,24 @@ def canonicalize_subsets(subsets: torch.Tensor, n_variables: int | None = None) 
 
 def subset_to_mask(subset: torch.Tensor | list[int] | tuple[int, ...]) -> int:
     """Convert one subset to an arbitrary-width Python integer bit mask."""
+    indices = subset.detach().cpu().tolist() if isinstance(subset, torch.Tensor) else subset
     mask = 0
-    for idx in subset:
+    for idx in indices:
         mask |= 1 << int(idx)
     return mask
 
 
 def _masks_from_canonical_subsets(subsets: torch.Tensor) -> list[int]:
-    """Convert already canonical ``[B, K]`` subsets to cache-key masks."""
-    return [subset_to_mask(row) for row in subsets]
+    """Convert canonical subsets to cache keys with one device transfer at most."""
+    if subsets.numel() == 0:
+        return []
+
+    if int(subsets.max()) < 63:
+        bits = torch.ones_like(subsets, dtype=torch.int64) << subsets
+        return bits.sum(dim=1).detach().cpu().tolist()
+
+    rows = subsets.detach().cpu().tolist()
+    return [subset_to_mask(row) for row in rows]
 
 
 def masks_from_subsets(subsets: torch.Tensor) -> list[int]:
