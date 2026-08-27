@@ -8,37 +8,30 @@ on:
 jobs:
   mc-maze-small:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e . pynwb dandi psutil
+      - run: python -m pip install -e . pynwb dandi
       - name: Download pinned MC_Maze_Small NWB
         run: |
           mkdir -p data
           dandi download --download assets --path-type exact -o data \
             "dandi://dandi/000140@0.220113.0408/sub-Jenkins/sub-Jenkins_ses-small_desc-train_behavior+ecephys.nwb"
           find data -maxdepth 4 -type f -name '*.nwb' -ls
-      - name: Run real neural benchmark
+      - name: Run targeted direct-O finite-sample benchmark
         run: |
           NWB_PATH="$(find data -type f -name '*.nwb' | head -n 1)"
           test -n "$NWB_PATH"
-          python benchmarks/benchmark_mc_maze.py \
-            --nwb-path "$NWB_PATH" \
-            --output-dir benchmark-results
-      - name: Run convergence, binning, split-half, and isolated-memory benchmark
-        run: |
-          NWB_PATH="$(find data -type f -name '*.nwb' | head -n 1)"
-          test -n "$NWB_PATH"
-          python benchmarks/benchmark_mc_maze_stability.py \
+          python benchmarks/benchmark_mc_maze_o_bias.py \
             --nwb-path "$NWB_PATH" \
             --output-dir benchmark-results
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: mc-maze-real-benchmark
+          name: mc-maze-o-bias-benchmark
           path: benchmark-results
           if-no-files-found: warn
