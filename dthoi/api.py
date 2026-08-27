@@ -276,10 +276,11 @@ def information_measures(
         Optional Torch device on which calculations should be performed.
     local_values
         If ``True``, also calculate TC, DTC, O-information, and S-information
-        for every observation. Local values are currently defined only for the
-        empirical and Miller-Madow entropy conventions. Other estimators raise
-        :class:`NotImplementedError` rather than imposing an arbitrary pointwise
-        decomposition.
+        for every observation. Local values are defined for ``"empirical"``,
+        ``"miller_madow"``, ``"schurmann"``, and ``"chao_shen"``. Shrinkage,
+        Pitman-Yor, and ANSB raise :class:`NotImplementedError` because their
+        global entropy contains contributions that cannot be assigned to the
+        observed samples without an arbitrary convention.
     max_local_values_per_batch
         Memory-control target for local calculations, expressed as the maximum
         approximate product ``variable sets × total samples`` processed at once.
@@ -297,11 +298,16 @@ def information_measures(
     Notes
     -----
     TC, DTC, O-information, and S-information are always derived from shared
-    subset entropies rather than separate estimation pipelines. ANSB has the
-    asymptotic requirement ``N/Q -> 0``; for binary singleton marginals
-    ``Q=2``, this requirement generally fails. ANSB-based multivariate measures
-    should therefore be interpreted only when the assumptions of every entropy
-    term involved are scientifically defensible.
+    subset entropies rather than separate estimation pipelines. Schürmann local
+    values are state-additive finite-sample contributions and Chao-Shen local
+    values are Horvitz-Thompson contributions; neither should be interpreted as
+    an ordinary Shannon surprisal. Their sample means nevertheless recover the
+    corresponding corrected global entropies exactly.
+
+    ANSB has the asymptotic requirement ``N/Q -> 0``; for binary singleton
+    marginals ``Q=2``, this requirement generally fails. ANSB-based multivariate
+    measures should therefore be interpreted only when the assumptions of every
+    entropy term involved are scientifically defensible.
 
     Local arrays necessarily scale with the number of observations. dTHOI
     controls temporary work in batches and does not persistently cache local
@@ -355,8 +361,8 @@ def analyze_orders(
         Optional Torch device on which calculations should be performed.
     local_values
         If ``True``, also return sample-resolved values for all four measures.
-        Local values are currently defined only for empirical and Miller-Madow
-        entropy estimation.
+        Supported entropy estimators are empirical, Miller-Madow, Schürmann,
+        and Chao-Shen. Other estimators raise :class:`NotImplementedError`.
     max_local_values_per_batch
         Memory-control target for local calculations, expressed as
         ``variable sets × total samples``. With local values enabled, dTHOI
