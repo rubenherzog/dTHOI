@@ -2,7 +2,8 @@ import torch
 
 import dthoi
 from dthoi.entropy.base import CountingEntropyProvider
-from dthoi.measures.core import nplets_measures
+from dthoi.measures.core import measures_from_provider, nplets_measures
+from dthoi.subsets import canonicalize_subsets
 
 
 def _data() -> torch.Tensor:
@@ -180,3 +181,45 @@ def test_analyze_orders_reduces_effective_batch_when_samples_make_locals_large()
     assert all(item.variable_sets.shape[0] <= 2 for item in results)
     assert all(item.information.local is not None for item in results)
     assert sum(item.variable_sets.shape[0] for item in results) == 4
+
+
+class _RecordingProvider(CountingEntropyProvider):
+    """Record local entropy requests while preserving provider behavior."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.local_requests: list[list[tuple[int, ...]]] = []
+
+    def entropy_with_local(self, subsets):
+        canonical = canonicalize_subsets(subsets, self.data.n_variables)
+        self.local_requests.append(
+            [tuple(row.tolist()) for row in canonical.detach().cpu()]
+        )
+        return super().entropy_with_local(subsets)
+
+
+def test_shared_local_entropy_terms_are_deduplicated_across_chunks():
+    provider = _RecordingProvider(_data(), count_mode="sparse")
+    output = measures_from_provider(
+        provider,
+        torch.tensor([[0, 1, 2], [0, 1, 3]]),
+        local_values=True,
+        max_local_values_per_batch=14,
+    )
+    assert isinstance(output, tuple)
+
+    singleton_batches = [
+        batch for batch in provider.local_requests if batch and len(batch[0]) == 1
+    ]
+    loo_batches = [
+        batch for batch in provider.local_requests if batch and len(batch[0]) == 2
+    ]
+
+    assert len(singleton_batches) > 1
+    assert len(loo_batches) > 1
+
+    singletons = [subset for batch in singleton_batches for subset in batch]
+    loo = [subset for batch in loo_batches for subset in batch]
+
+    assert len(singletons) == len(set(singletons)) == 4
+    assert len(loo) == len(set(loo)) == 5
