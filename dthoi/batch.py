@@ -5,7 +5,7 @@ from typing import Any
 import torch
 
 from .collectors import BatchAggregation, BatchCollector, identity_aggregation, identity_collector
-from .data import PreparedDiscreteData, prepare_discrete_data
+from .data import DiscreteInput, prepare_discrete_data
 from .entropy.base import CountingEntropyProvider
 from .entropy.cache import EntropyCache
 from .entropy.counting import CountMode
@@ -15,7 +15,7 @@ from .subsets import iter_subset_batches
 
 
 def multi_order_measures(
-    X: PreparedDiscreteData | torch.Tensor | list[torch.Tensor],
+    X: DiscreteInput,
     *,
     min_order: int = 3,
     max_order: int | None = None,
@@ -27,17 +27,44 @@ def multi_order_measures(
     batch_collector: BatchCollector | None = None,
     aggregation: BatchAggregation | None = None,
 ) -> Any:
-    """Exhaustively evaluate a range of subset orders using one entropy cache."""
+    """Evaluate all subsets across a contiguous range of orders.
 
-    prepared = X if isinstance(X, PreparedDiscreteData) else prepare_discrete_data(X, device=device)
-    if device is not None and isinstance(X, PreparedDiscreteData):
-        target = torch.device(device)
-        if any(ds.device != target for ds in X.datasets):
-            prepared = PreparedDiscreteData(tuple(ds.to(target) for ds in X.datasets), X.n_variables)
+    Subsets are generated lazily in batches and evaluated through one shared
+    entropy provider and cache. Completed batches are moved to CPU by the
+    default collector.
 
-    N = prepared.n_variables
-    max_order = N if max_order is None else max_order
-    if not 2 <= min_order <= max_order <= N:
+    Parameters
+    ----------
+    X
+        Discrete observations accepted by :func:`prepare_discrete_data`.
+    min_order, max_order
+        Inclusive subset-order range. ``max_order=None`` uses all variables.
+    estimator
+        Entropy estimator name or estimator instance.
+    count_mode
+        ``"dense"``, ``"sparse"``, or ``"auto"`` counting strategy.
+    batch_size
+        Maximum number of subsets generated per batch.
+    device
+        Destination device for the observations and subset batches.
+    cache
+        Optional entropy cache shared across every order and batch.
+    batch_collector
+        Callback receiving ``(subsets, measures, order, batch_index)``.
+    aggregation
+        Callback applied once to the list of collected batch outputs.
+
+    Returns
+    -------
+    Any
+        Aggregated collector output. By default, a list of CPU
+        ``(subsets, measures)`` tuples.
+    """
+    prepared = prepare_discrete_data(X, device=device)
+
+    n_variables = prepared.n_variables
+    max_order = n_variables if max_order is None else max_order
+    if not 2 <= min_order <= max_order <= n_variables:
         raise ValueError("Require 2 <= min_order <= max_order <= N.")
 
     entropy_cache = cache if cache is not None else EntropyCache()
@@ -54,7 +81,7 @@ def multi_order_measures(
     items: list[Any] = []
     for order in range(min_order, max_order + 1):
         for batch_index, subsets in enumerate(
-            iter_subset_batches(N, order, batch_size, device=prepared.device)
+            iter_subset_batches(n_variables, order, batch_size, device=prepared.device)
         ):
             measures = measures_from_provider(provider, subsets)
             items.append(collector(subsets, measures, order, batch_index))
