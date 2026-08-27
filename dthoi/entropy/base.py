@@ -20,10 +20,13 @@ from .estimators import CountEntropyEstimator, resolve_estimator
 class CountingEntropyProvider:
     """Exact-counting entropy backend for binary discrete observations.
 
+    This is an internal execution component. Scientific users should normally
+    call :func:`dthoi.entropy` or :func:`dthoi.information_measures`.
+
     Parameters
     ----------
     X
-        Discrete observations accepted by :func:`prepare_discrete_data`.
+        Discrete observations accepted by :func:`dthoi.prepare_data`.
     estimator
         Entropy estimator name or estimator instance.
     count_mode
