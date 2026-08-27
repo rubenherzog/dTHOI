@@ -114,4 +114,6 @@ and exhaustive local analyses scale with the full number of variable combination
 
 Local values do not introduce independent TC, DTC, O-information, or S-information estimators. The implementation reuses the same state encodings, exact counts, entropy estimator, and entropy identities as the global path.
 
+Repeated singleton and leave-one-out entropy terms are deduplicated within each local measure batch, so a shared lower-order variable set is estimated once and scattered to every parent set that needs it.
+
 The persistent entropy cache remains global-only. Caching sample-resolved entropy arrays would change cache growth from approximately `O(variable sets)` to `O(variable sets × samples)`, so local arrays live only for the requesting batch.

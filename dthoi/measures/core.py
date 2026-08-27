@@ -9,7 +9,11 @@ from ..entropy.base import CountingEntropyProvider
 from ..entropy.cache import EntropyCache
 from ..entropy.counting import CountMode
 from ..entropy.estimators import CountEntropyEstimator
-from ..subsets import canonicalize_subsets, leave_one_out_subsets
+from ..subsets import (
+    _masks_from_canonical_subsets,
+    canonicalize_subsets,
+    leave_one_out_subsets,
+)
 
 LocalMeasureValues: TypeAlias = tuple[torch.Tensor, ...]
 MeasureOutput: TypeAlias = torch.Tensor | tuple[torch.Tensor, LocalMeasureValues]
@@ -74,25 +78,73 @@ def _accumulate_local_entropy_terms(
     *,
     max_local_values_per_batch: int,
 ) -> None:
-    """Accumulate entropy terms without materializing ``[B, K, T]`` arrays.
+    """Accumulate unique entropy terms without materializing ``[B, K, T]``.
 
-    ``term_subsets`` may contain all singleton or leave-one-out terms required
-    by a measure batch. They are processed in chunks whose local entropy output
-    respects the configured ``variable sets × samples`` target, then added
-    directly into the parent TC or DTC accumulator.
+    Repeated singleton or leave-one-out variable sets are deduplicated across
+    the complete parent batch. Each unique entropy term is estimated once,
+    then scattered to every parent variable set that uses it. Both estimation
+    and scatter expansion are chunked according to the configured
+    ``variable sets × samples`` target.
     """
     terms_per_batch = local_sets_per_batch(
         provider.data,
         max_local_values_per_batch,
     )
+    masks = _masks_from_canonical_subsets(term_subsets)
+    parent_list = parent_indices.detach().cpu().tolist()
 
-    for start in range(0, term_subsets.shape[0], terms_per_batch):
-        stop = min(start + terms_per_batch, term_subsets.shape[0])
-        term_entropy, term_local = provider.entropy_with_local(term_subsets[start:stop])
-        parents = parent_indices[start:stop]
-        global_channel.index_add_(0, parents, term_entropy)
-        for dataset_index, local_values in enumerate(term_local):
-            local_channels[dataset_index].index_add_(0, parents, local_values)
+    unique_subsets: list[torch.Tensor] = []
+    unique_index: dict[int, int] = {}
+    parents_by_unique: list[list[int]] = []
+
+    for mask, subset, parent in zip(masks, term_subsets, parent_list, strict=True):
+        index = unique_index.get(mask)
+        if index is None:
+            index = len(unique_subsets)
+            unique_index[mask] = index
+            unique_subsets.append(subset)
+            parents_by_unique.append([])
+        parents_by_unique[index].append(parent)
+
+    for unique_start in range(0, len(unique_subsets), terms_per_batch):
+        unique_stop = min(unique_start + terms_per_batch, len(unique_subsets))
+        entropy_subsets = torch.stack(unique_subsets[unique_start:unique_stop])
+        term_entropy, term_local = provider.entropy_with_local(entropy_subsets)
+
+        source_rows: list[int] = []
+        target_parents: list[int] = []
+        for source_row, parents in enumerate(
+            parents_by_unique[unique_start:unique_stop]
+        ):
+            source_rows.extend([source_row] * len(parents))
+            target_parents.extend(parents)
+
+        for occurrence_start in range(0, len(source_rows), terms_per_batch):
+            occurrence_stop = min(
+                occurrence_start + terms_per_batch,
+                len(source_rows),
+            )
+            sources = torch.tensor(
+                source_rows[occurrence_start:occurrence_stop],
+                dtype=torch.long,
+                device=provider.data.device,
+            )
+            parents = torch.tensor(
+                target_parents[occurrence_start:occurrence_stop],
+                dtype=torch.long,
+                device=provider.data.device,
+            )
+            global_channel.index_add_(
+                0,
+                parents,
+                term_entropy.index_select(0, sources),
+            )
+            for dataset_index, local_values in enumerate(term_local):
+                local_channels[dataset_index].index_add_(
+                    0,
+                    parents,
+                    local_values.index_select(0, sources),
+                )
 
 
 def _measures_with_local_from_provider(
