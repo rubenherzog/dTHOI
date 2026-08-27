@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Literal
 
 import torch
@@ -8,6 +9,30 @@ CountMode = Literal["auto", "dense", "sparse"]
 
 _INT64_BYTES = torch.empty((), dtype=torch.int64).element_size()
 _FLOAT64_BYTES = torch.empty((), dtype=torch.float64).element_size()
+
+
+@dataclass(frozen=True)
+class SparseCounts:
+    """Packed observed-state counts for a batch of variable sets.
+
+    Parameters
+    ----------
+    values
+        Positive state counts concatenated across all batch rows.
+    row_ids
+        Batch-row index corresponding to each value in ``values``.
+    batch_size
+        Number of variable sets represented.
+
+    Notes
+    -----
+    The packed representation avoids Python loops over variable sets while
+    allowing each set to contain a different number of observed states.
+    """
+
+    values: torch.Tensor
+    row_ids: torch.Tensor
+    batch_size: int
 
 
 def encode_binary_states(data: torch.Tensor, subsets: torch.Tensor) -> torch.Tensor:
@@ -79,73 +104,90 @@ def mask_binary_rows(row_codes: torch.Tensor, subset_masks: list[int]) -> torch.
 
 
 def dense_counts_from_codes(codes: torch.Tensor, n_states: int) -> torch.Tensor:
-    """Count every possible state for each encoded subset.
+    """Count every possible state for each encoded subset in one Torch batch.
 
     Parameters
     ----------
     codes
-        Integer state codes with shape ``[B, T]``.
+        Integer state codes with shape ``[B, T]`` and values in
+        ``[0, n_states)``.
     n_states
-        Total state-space cardinality used as ``minlength`` for each histogram.
+        Total state-space cardinality used for each histogram.
 
     Returns
     -------
     torch.Tensor
         ``torch.int64`` counts with shape ``[B, n_states]``.
     """
-    batch_size = codes.shape[0]
-    counts = torch.zeros((batch_size, n_states), dtype=torch.int64, device=codes.device)
-    for batch_index in range(batch_size):
-        counts[batch_index] = torch.bincount(codes[batch_index], minlength=n_states)
-    return counts
+    if codes.ndim != 2:
+        raise ValueError("codes must have shape [B, T].")
+
+    counts = torch.zeros(
+        (codes.shape[0], n_states), dtype=torch.int64, device=codes.device
+    )
+    return counts.scatter_add_(1, codes, torch.ones_like(codes, dtype=torch.int64))
 
 
 def sparse_counts_from_codes(
     codes: torch.Tensor,
     *,
     return_inverse: bool = False,
-) -> list[torch.Tensor] | tuple[list[torch.Tensor], list[torch.Tensor]]:
-    """Count observed states for each encoded subset.
+) -> SparseCounts | tuple[SparseCounts, torch.Tensor]:
+    """Count observed states for every subset as one packed Torch batch.
 
     Parameters
     ----------
     codes
-        Integer state codes with shape ``[B, T]``.
+        Integer state codes with shape ``[B, T]``. Codes need not be contiguous
+        across the state space.
     return_inverse
-        If ``True``, also return one index vector per subset mapping every
-        observation to its observed-state count. The mapping preserves the
-        original sample order and is used to compute local entropy values
-        without constructing Python state dictionaries.
+        If ``True``, also return a ``[B, T]`` tensor mapping every observation
+        in original sample order to the corresponding position in packed
+        ``values``. This supports local entropy calculation without state
+        dictionaries or per-subset Python loops.
 
     Returns
     -------
-    list[torch.Tensor] or tuple[list[torch.Tensor], list[torch.Tensor]]
-        One ``torch.int64`` count vector per subset. When ``return_inverse`` is
-        enabled, the second list contains ``[T]`` state-index vectors aligned
-        with the original observations.
+    SparseCounts or tuple[SparseCounts, torch.Tensor]
+        Packed positive counts and their batch-row indices. When requested, the
+        second item is the packed-state index for every original observation.
     """
-    counts_values: list[torch.Tensor] = []
-    inverse_values: list[torch.Tensor] = []
+    if codes.ndim != 2:
+        raise ValueError("codes must have shape [B, T].")
 
-    for row in codes:
+    batch_size, n_samples = codes.shape
+    if n_samples == 0:
+        empty = torch.empty(0, dtype=torch.int64, device=codes.device)
+        packed = SparseCounts(empty, empty, batch_size)
         if return_inverse:
-            sorted_codes, permutation = torch.sort(row)
-            _, inverse_sorted, counts = torch.unique_consecutive(
-                sorted_codes,
-                return_inverse=True,
-                return_counts=True,
-            )
-            inverse = torch.empty_like(inverse_sorted)
-            inverse[permutation] = inverse_sorted
-            inverse_values.append(inverse)
-        else:
-            sorted_codes = torch.sort(row).values
-            _, counts = torch.unique_consecutive(sorted_codes, return_counts=True)
-        counts_values.append(counts)
+            return packed, torch.empty_like(codes, dtype=torch.int64)
+        return packed
 
-    if return_inverse:
-        return counts_values, inverse_values
-    return counts_values
+    sorted_codes, permutation = torch.sort(codes, dim=1)
+    flattened = sorted_codes.reshape(-1)
+    changes = torch.ones(flattened.numel(), dtype=torch.bool, device=codes.device)
+    if flattened.numel() > 1:
+        changes[1:] = flattened[1:] != flattened[:-1]
+    if batch_size > 1:
+        row_starts = torch.arange(1, batch_size, device=codes.device) * n_samples
+        changes[row_starts] = True
+
+    starts = torch.nonzero(changes, as_tuple=False).flatten()
+    final = torch.tensor([batch_size * n_samples], dtype=starts.dtype, device=codes.device)
+    ends = torch.cat((starts[1:], final))
+    values = (ends - starts).to(dtype=torch.int64)
+    row_ids = torch.div(starts, n_samples, rounding_mode="floor").to(dtype=torch.int64)
+    packed = SparseCounts(values=values, row_ids=row_ids, batch_size=batch_size)
+
+    if not return_inverse:
+        return packed
+
+    packed_index_sorted = (
+        torch.cumsum(changes.to(dtype=torch.int64), dim=0) - 1
+    ).reshape(batch_size, n_samples)
+    inverse = torch.empty_like(packed_index_sorted)
+    inverse.scatter_(1, permutation, packed_index_sorted)
+    return packed, inverse
 
 
 def choose_count_mode(
