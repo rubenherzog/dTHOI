@@ -59,10 +59,13 @@ def nplets_measures(
 ) -> torch.Tensor:
     """Compute higher-order information measures for an explicit subset batch.
 
+    This is an internal tensor-level function. Scientific users should normally
+    call :func:`dthoi.information_measures`.
+
     Parameters
     ----------
     X
-        Discrete observations accepted by :func:`dthoi.prepare_discrete_data`.
+        Discrete observations accepted by :func:`dthoi.prepare_data`.
     subsets
         Variable subsets with shape ``[B, K]`` or one subset ``[K]``.
     estimator
