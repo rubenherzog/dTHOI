@@ -4,7 +4,13 @@ Local information values resolve the four dTHOI measures at the level of individ
 
 ## Definitions
 
-For a variable set \(A\), observation \(t\), and empirical probability \(\hat p_A\), the local Shannon entropy value is the surprisal
+For a variable set \(A\), observation \(t\), and an entropy estimator that defines local values, write its sample-resolved contribution as \(h_A(t)\). dTHOI requires the estimator-specific local values to satisfy
+
+\[
+\frac{1}{T}\sum_t h_A(t)=\widehat H_A.
+\]
+
+For empirical entropy this is the ordinary Shannon surprisal,
 
 \[
 h_A(t) = -\log_2 \hat p_A\!\left(x_A^{(t)}\right).
@@ -30,19 +36,15 @@ o_A(t) = tc_A(t) - dtc_A(t),
 s_A(t) = tc_A(t) + dtc_A(t).
 \]
 
-All values are reported in bits.
+All values are reported in bits. Whenever an entropy estimator supports local values, averaging over observations exactly recovers the corresponding global TC, DTC, O-information, and S-information.
 
-For empirical entropy, averaging over observations exactly recovers the corresponding global measure:
+## Entropy-estimator conventions
 
-\[
-\frac{1}{T}\sum_t tc_A(t)=TC_A,
-\]
+### Empirical
 
-and analogously for DTC, O-information, and S-information.
+The empirical estimator has the direct pointwise interpretation of Shannon surprisal shown above.
 
-## Entropy-estimator convention
-
-The empirical estimator has a direct pointwise interpretation as Shannon surprisal.
+### Miller–Madow
 
 For Miller–Madow entropy, dTHOI uses
 
@@ -58,7 +60,60 @@ h_{MM}(t)=h_{ML}(t)+\frac{K-1}{2T\ln 2}.
 
 This convention guarantees that the sample mean of the local values equals the Miller–Madow-corrected entropy. The additive correction should not be interpreted as a pointwise surprisal derived from a corrected probability distribution.
 
-Future entropy estimators are not required to define local values. Local support is an explicit estimator capability rather than an automatic consequence of providing a scalar entropy estimate.
+### Schürmann
+
+For the implemented Schürmann estimator with \(\xi=1/2\), let \(n_i\) be the count of the state containing observation \(t\), and define
+
+\[
+I(n)=\int_0^1 \frac{u^{n-1}}{1+u}\,du.
+\]
+
+The estimator is state-additive, so each observation in state \(i\) has the canonical contribution
+
+\[
+h_{Sch}(t)=\frac{\psi(T)-\psi(n_i)-(-1)^{n_i}I(n_i)}{\ln 2}.
+\]
+
+Averaging these values over the observations gives the Schürmann entropy exactly. These are finite-sample estimator contributions, not surprisals from a normalized corrected probability distribution.
+
+### Chao–Shen
+
+Let \(f_1\) be the number of singleton states and
+
+\[
+\widehat C=1-\frac{f_1}{T}, \qquad
+\widetilde p_i=\widehat C\frac{n_i}{T}.
+\]
+
+The Chao–Shen estimator is a Horvitz–Thompson sum over observed states,
+
+\[
+\widehat H_{CS}
+=-\sum_i\frac{\widetilde p_i\log_2\widetilde p_i}
+{1-(1-\widetilde p_i)^T}.
+\]
+
+Dividing each state contribution equally among its \(n_i\) observations gives
+
+\[
+h_{CS}(t)
+=-\frac{\widehat C\log_2\widetilde p_i}
+{1-(1-\widetilde p_i)^T}.
+\]
+
+Its sample mean is exactly \(\widehat H_{CS}\). These values are Horvitz–Thompson entropy contributions rather than ordinary Shannon surprisals. If all observations are singletons then \(\widehat C=0\); both global and local Chao–Shen estimates are undefined and dTHOI returns `NaN`.
+
+### Estimators without local values
+
+Shrinkage, fixed Pitman–Yor, and asymptotic NSB do not expose local values.
+
+For shrinkage, unobserved nominal states receive positive probability and contribute to the estimated entropy. The surprisal of an observed sample under the shrunken probabilities therefore averages to an empirical cross-entropy, not to the shrinkage entropy; recovering the latter would require an arbitrary allocation of the unseen-state contribution.
+
+For fixed Pitman–Yor, the posterior mean entropy contains an explicit posterior tail over unobserved symbols. There is no unique way to assign that tail entropy to the observed samples while preserving the global posterior mean.
+
+Asymptotic NSB is a global coincidence-count estimator driven by the sample size and number of occupied states. An exact observation-level representation would amount to an arbitrary redistribution of the scalar estimate rather than a state-resolved entropy contribution.
+
+Local support is therefore an explicit estimator capability rather than an automatic consequence of providing a scalar entropy estimate.
 
 ## Returned shapes
 
