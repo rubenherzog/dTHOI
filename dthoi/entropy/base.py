@@ -11,7 +11,9 @@ from .counting import (
     CountMode,
     choose_count_mode,
     dense_counts_from_codes,
+    encode_binary_rows,
     encode_binary_states,
+    mask_binary_rows,
     sparse_counts_from_codes,
 )
 from .estimators import CountEntropyEstimator, resolve_estimator
@@ -41,6 +43,7 @@ class CountingEntropyProvider:
         self.cache = cache if cache is not None else EntropyCache()
         self.dense_state_limit = dense_state_limit
         self.dense_memory_limit_bytes = dense_memory_limit_bytes
+        self._row_codes: list[torch.Tensor | None] = [None] * self.data.n_datasets
 
     def entropy(self, subsets: torch.Tensor) -> torch.Tensor:
         subsets = canonicalize_subsets(subsets, self.data.n_variables)
@@ -69,7 +72,6 @@ class CountingEntropyProvider:
             entropy_values = torch.empty((U, D), dtype=torch.float64, device=device)
 
             for d, dataset in enumerate(self.data.datasets):
-                codes = encode_binary_states(dataset, missing_subsets)
                 mode = choose_count_mode(
                     order=K,
                     n_subsets=U,
@@ -80,9 +82,18 @@ class CountingEntropyProvider:
                 )
 
                 if mode == "dense":
+                    codes = encode_binary_states(dataset, missing_subsets)
                     counts = dense_counts_from_codes(codes, 1 << K)
                     values = self.estimator.entropy_from_dense(counts.values)
                 else:
+                    if self.data.n_variables <= 63:
+                        row_codes = self._row_codes[d]
+                        if row_codes is None:
+                            row_codes = encode_binary_rows(dataset)
+                            self._row_codes[d] = row_codes
+                        codes = mask_binary_rows(row_codes, missing_masks)
+                    else:
+                        codes = encode_binary_states(dataset, missing_subsets)
                     counts = sparse_counts_from_codes(codes)
                     values = self.estimator.entropy_from_sparse(counts.values)
 
