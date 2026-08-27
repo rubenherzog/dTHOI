@@ -14,11 +14,9 @@ from typing import Any
 import torch
 
 from .batch import multi_order_measures
-from .data import PreparedDiscreteData, prepare_discrete_data
+from .data import DiscreteData, prepare_discrete_data
 from .entropy.base import CountingEntropyProvider
 from .measures.core import nplets_measures
-
-DiscreteData = PreparedDiscreteData
 
 
 @dataclass(frozen=True)
