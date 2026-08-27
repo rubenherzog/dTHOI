@@ -22,7 +22,7 @@ def test_public_api_uses_scientific_names():
         "InformationMeasures",
         "InteractionResults",
         "analyze_orders",
-        "entropy",
+        "estimate_entropy",
         "information_measures",
         "prepare_data",
     }
@@ -42,7 +42,7 @@ def test_prepare_data_returns_reusable_discrete_data():
 
 
 def test_entropy_accepts_plain_variable_sets():
-    values = dthoi.entropy(_example_data(), [[0, 1], [1, 2]])
+    values = dthoi.estimate_entropy(_example_data(), [[0, 1], [1, 2]])
     assert values.shape == (2, 1)
     assert values.dtype == torch.float64
 
@@ -83,8 +83,8 @@ def test_prepared_data_can_be_reused_across_public_functions():
     prepared = dthoi.prepare_data(_example_data())
     variable_sets = [[0, 1, 2], [1, 2, 3]]
 
-    direct_entropy = dthoi.entropy(_example_data(), variable_sets)
-    prepared_entropy = dthoi.entropy(prepared, variable_sets)
+    direct_entropy = dthoi.estimate_entropy(_example_data(), variable_sets)
+    prepared_entropy = dthoi.estimate_entropy(prepared, variable_sets)
     direct_information = dthoi.information_measures(_example_data(), variable_sets).values
     prepared_information = dthoi.information_measures(prepared, variable_sets).values
 
