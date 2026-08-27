@@ -5,7 +5,7 @@ from .api import (
     InformationMeasures,
     InteractionResults,
     analyze_orders,
-    entropy,
+    estimate_entropy,
     information_measures,
     prepare_data,
 )
@@ -15,7 +15,7 @@ __all__ = [
     "InformationMeasures",
     "InteractionResults",
     "analyze_orders",
-    "entropy",
+    "estimate_entropy",
     "information_measures",
     "prepare_data",
 ]
