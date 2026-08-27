@@ -36,6 +36,7 @@ def test_public_api_uses_scientific_names():
 def test_prepare_data_returns_reusable_discrete_data():
     prepared = dthoi.prepare_data(_example_data())
     assert isinstance(prepared, dthoi.DiscreteData)
+    assert type(prepared).__name__ == "DiscreteData"
     assert prepared.n_variables == 4
     assert prepared.sample_counts == (5,)
 
