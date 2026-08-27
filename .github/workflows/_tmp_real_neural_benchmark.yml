@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e . pynwb dandi
+      - run: python -m pip install -e . pynwb dandi psutil
       - name: Download pinned MC_Maze_Small NWB
         run: |
           mkdir -p data
