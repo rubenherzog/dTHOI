@@ -215,8 +215,11 @@ def estimate_entropy(
         Variable indices with shape ``[sets, order]`` or one set with shape
         ``[order]``. Variables may be supplied in any order.
     entropy_estimator
-        Entropy estimator. ``"empirical"`` uses observed state frequencies;
-        ``"miller_madow"`` applies the Miller-Madow finite-sample correction.
+        Entropy estimator. Supported choices are ``"empirical"``,
+        ``"miller_madow"``, ``"schurmann"``, ``"shrinkage"``,
+        ``"chao_shen"``, ``"pitman_yor"``, and ``"ansb"``. Pitman-Yor uses
+        the fixed convention ``d=1/2, alpha=0``. ANSB is intended for severe
+        undersampling and warns when ``N / 2**order > 0.1``.
     device
         Optional Torch device on which calculations should be performed.
 
@@ -224,6 +227,14 @@ def estimate_entropy(
     -------
     torch.Tensor
         Entropy in bits with shape ``[variable_sets, datasets]``.
+
+    Notes
+    -----
+    All estimators reuse the same exact state-counting paths. Shrinkage uses the
+    complete nominal binary support ``2**order``; if structural zeros are known
+    scientifically, this uniform-target assumption should be considered.
+    Chao-Shen returns ``NaN`` when every observation is a singleton. ANSB is
+    undefined without repeated observations and returns ``NaN`` in that case.
     """
     provider = CountingEntropyProvider(
         prepare_discrete_data(data, device=device),
@@ -257,16 +268,18 @@ def information_measures(
         Variable indices with shape ``[sets, order]`` or one set with shape
         ``[order]``.
     entropy_estimator
-        Entropy estimator. Supported public choices are ``"empirical"`` and
-        ``"miller_madow"``.
+        Global entropy estimator used consistently for every required subset
+        entropy. Supported choices are ``"empirical"``, ``"miller_madow"``,
+        ``"schurmann"``, ``"shrinkage"``, ``"chao_shen"``,
+        ``"pitman_yor"``, and ``"ansb"``.
     device
         Optional Torch device on which calculations should be performed.
     local_values
         If ``True``, also calculate TC, DTC, O-information, and S-information
-        for every observation. For empirical entropy these are derived from
-        local Shannon surprisals. Miller-Madow uses the same global correction
-        as the scalar estimator, distributed uniformly across observations so
-        the local mean equals the corrected global value.
+        for every observation. Local values are currently defined only for the
+        empirical and Miller-Madow entropy conventions. Other estimators raise
+        :class:`NotImplementedError` rather than imposing an arbitrary pointwise
+        decomposition.
     max_local_values_per_batch
         Memory-control target for local calculations, expressed as the maximum
         approximate product ``variable sets × total samples`` processed at once.
@@ -283,6 +296,13 @@ def information_measures(
 
     Notes
     -----
+    TC, DTC, O-information, and S-information are always derived from shared
+    subset entropies rather than separate estimation pipelines. ANSB has the
+    asymptotic requirement ``N/Q -> 0``; for binary singleton marginals
+    ``Q=2``, this requirement generally fails. ANSB-based multivariate measures
+    should therefore be interpreted only when the assumptions of every entropy
+    term involved are scientifically defensible.
+
     Local arrays necessarily scale with the number of observations. dTHOI
     controls temporary work in batches and does not persistently cache local
     arrays, but the requested final local result still occupies
@@ -325,8 +345,9 @@ def analyze_orders(
         Largest number of variables considered jointly. By default, all
         available variables are allowed.
     entropy_estimator
-        Entropy estimator. Supported public choices are ``"empirical"`` and
-        ``"miller_madow"``.
+        Global entropy estimator reused across all interaction orders. Supported
+        choices are ``"empirical"``, ``"miller_madow"``, ``"schurmann"``,
+        ``"shrinkage"``, ``"chao_shen"``, ``"pitman_yor"``, and ``"ansb"``.
     sets_per_batch
         Maximum number of variable sets evaluated together. The default is
         intended to work well for routine global analyses.
@@ -334,7 +355,8 @@ def analyze_orders(
         Optional Torch device on which calculations should be performed.
     local_values
         If ``True``, also return sample-resolved values for all four measures.
-        This can produce much larger outputs and is disabled by default.
+        Local values are currently defined only for empirical and Miller-Madow
+        entropy estimation.
     max_local_values_per_batch
         Memory-control target for local calculations, expressed as
         ``variable sets × total samples``. With local values enabled, dTHOI
@@ -353,7 +375,9 @@ def analyze_orders(
     -----
     Batching controls peak working and accelerator memory, not the total size of
     the returned Python list. Exhaustive local analyses still scale with the
-    total number of variable sets times the number of samples.
+    total number of variable sets times the number of samples. The same ANSB
+    marginal-regime limitation described in :func:`information_measures`
+    applies to exhaustive analyses.
     """
     prepared = prepare_discrete_data(data, device=device)
 

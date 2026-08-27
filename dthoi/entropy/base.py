@@ -7,6 +7,7 @@ from ..subsets import _masks_from_canonical_subsets, canonicalize_subsets
 from .cache import EntropyCache
 from .counting import (
     CountMode,
+    SparseCounts,
     choose_count_mode,
     dense_counts_from_codes,
     encode_binary_rows,
@@ -97,6 +98,7 @@ class CountingEntropyProvider:
         n_subsets, order = subsets.shape
         n_datasets = self.data.n_datasets
         device = self.data.device
+        n_states = 1 << order
         entropy_values = torch.empty(
             (n_subsets, n_datasets), dtype=torch.float64, device=device
         )
@@ -114,8 +116,8 @@ class CountingEntropyProvider:
 
             if mode == "dense":
                 codes = encode_binary_states(dataset, subsets)
-                counts = dense_counts_from_codes(codes, 1 << order)
-                values = self.estimator.entropy_from_dense(counts)
+                counts = dense_counts_from_codes(codes, n_states)
+                values = self.estimator.entropy_from_dense(counts, n_states=n_states)
                 if return_local:
                     assert local_values is not None
                     local_values.append(self.estimator.local_from_dense(counts, codes))
@@ -130,15 +132,20 @@ class CountingEntropyProvider:
                     codes = encode_binary_states(dataset, subsets)
 
                 if return_local:
-                    sparse_result = sparse_counts_from_codes(codes, return_inverse=True)
-                    counts, inverse = sparse_result
-                    values = self.estimator.entropy_from_sparse(counts)
+                    packed, inverse = sparse_counts_from_codes(
+                        codes, return_inverse=True
+                    )
+                    values = self.estimator.entropy_from_sparse(
+                        packed, n_states=n_states
+                    )
                     assert local_values is not None
-                    local_values.append(self.estimator.local_from_sparse(counts, inverse))
+                    local_values.append(self.estimator.local_from_sparse(packed, inverse))
                 else:
-                    counts = sparse_counts_from_codes(codes)
-                    assert isinstance(counts, list)
-                    values = self.estimator.entropy_from_sparse(counts)
+                    packed = sparse_counts_from_codes(codes)
+                    assert isinstance(packed, SparseCounts)
+                    values = self.estimator.entropy_from_sparse(
+                        packed, n_states=n_states
+                    )
 
             entropy_values[:, dataset_index] = values.to(device=device, dtype=torch.float64)
 
