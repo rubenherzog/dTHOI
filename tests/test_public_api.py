@@ -21,6 +21,7 @@ def test_public_api_uses_scientific_names():
         "DiscreteData",
         "InformationMeasures",
         "InteractionResults",
+        "LocalInformationMeasures",
         "analyze_orders",
         "estimate_entropy",
         "information_measures",
@@ -52,6 +53,7 @@ def test_information_measures_have_named_accessors():
 
     assert isinstance(results, dthoi.InformationMeasures)
     assert results.values.shape == (2, 1, 4)
+    assert results.local is None
     torch.testing.assert_close(results.total_correlation, results.values[..., 0])
     torch.testing.assert_close(results.dual_total_correlation, results.values[..., 1])
     torch.testing.assert_close(results.o_information, results.values[..., 2])
@@ -77,6 +79,7 @@ def test_analyze_orders_returns_named_results():
     assert all(result.order == 3 for result in results)
     assert sum(result.variable_sets.shape[0] for result in results) == 4
     assert all(result.information.values.shape[-1] == 4 for result in results)
+    assert all(result.information.local is None for result in results)
 
 
 def test_prepared_data_can_be_reused_across_public_functions():

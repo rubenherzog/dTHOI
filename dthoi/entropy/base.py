@@ -23,6 +23,10 @@ class CountingEntropyProvider:
     This is an internal execution component. Scientific users should normally
     call :func:`dthoi.estimate_entropy` or :func:`dthoi.information_measures`.
 
+    The provider owns the shared ``variable set -> entropy`` cache. Local
+    entropy values are computed only when requested and are never stored in the
+    persistent cache because their size scales with the number of samples.
+
     Parameters
     ----------
     X
@@ -61,6 +65,85 @@ class CountingEntropyProvider:
         self.dense_memory_limit_bytes = dense_memory_limit_bytes
         self._row_codes: list[torch.Tensor | None] = [None] * self.data.n_datasets
 
+    def _estimate_uncached(
+        self,
+        subsets: torch.Tensor,
+        masks: list[int],
+        *,
+        return_local: bool,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...] | None]:
+        """Estimate uncached entropy terms, optionally retaining sample values.
+
+        Parameters
+        ----------
+        subsets
+            Canonical fixed-order variable sets with shape ``[B, K]``.
+        masks
+            Canonical integer masks corresponding one-to-one with ``subsets``.
+        return_local
+            Whether to also calculate entropy values for every observation.
+
+        Returns
+        -------
+        tuple
+            Global entropy with shape ``[B, D]`` and, when requested, one local
+            tensor per dataset with shape ``[B, T_d]``. All values are in bits.
+        """
+        if return_local and not self.estimator.supports_local_values:
+            raise NotImplementedError(
+                f"Entropy estimator {self.estimator.name!r} does not define local values."
+            )
+
+        n_subsets, order = subsets.shape
+        n_datasets = self.data.n_datasets
+        device = self.data.device
+        entropy_values = torch.empty(
+            (n_subsets, n_datasets), dtype=torch.float64, device=device
+        )
+        local_values: list[torch.Tensor] | None = [] if return_local else None
+
+        for dataset_index, dataset in enumerate(self.data.datasets):
+            mode = choose_count_mode(
+                order=order,
+                n_subsets=n_subsets,
+                n_samples=dataset.shape[0],
+                requested=self.count_mode,
+                dense_state_limit=self.dense_state_limit,
+                dense_memory_limit_bytes=self.dense_memory_limit_bytes,
+            )
+
+            if mode == "dense":
+                codes = encode_binary_states(dataset, subsets)
+                counts = dense_counts_from_codes(codes, 1 << order)
+                values = self.estimator.entropy_from_dense(counts)
+                if return_local:
+                    assert local_values is not None
+                    local_values.append(self.estimator.local_from_dense(counts, codes))
+            else:
+                if self.data.n_variables <= 63:
+                    row_codes = self._row_codes[dataset_index]
+                    if row_codes is None:
+                        row_codes = encode_binary_rows(dataset)
+                        self._row_codes[dataset_index] = row_codes
+                    codes = mask_binary_rows(row_codes, masks)
+                else:
+                    codes = encode_binary_states(dataset, subsets)
+
+                if return_local:
+                    sparse_result = sparse_counts_from_codes(codes, return_inverse=True)
+                    counts, inverse = sparse_result
+                    values = self.estimator.entropy_from_sparse(counts)
+                    assert local_values is not None
+                    local_values.append(self.estimator.local_from_sparse(counts, inverse))
+                else:
+                    counts = sparse_counts_from_codes(codes)
+                    assert isinstance(counts, list)
+                    values = self.estimator.entropy_from_sparse(counts)
+
+            entropy_values[:, dataset_index] = values.to(device=device, dtype=torch.float64)
+
+        return entropy_values, None if local_values is None else tuple(local_values)
+
     def entropy(self, subsets: torch.Tensor) -> torch.Tensor:
         """Estimate entropy for a fixed-order batch of variable subsets.
 
@@ -77,7 +160,7 @@ class CountingEntropyProvider:
         """
         subsets = canonicalize_subsets(subsets, self.data.n_variables)
         masks = _masks_from_canonical_subsets(subsets)
-        batch_size, order = subsets.shape
+        batch_size = subsets.shape[0]
         n_datasets = self.data.n_datasets
         device = self.data.device
 
@@ -99,38 +182,11 @@ class CountingEntropyProvider:
 
         missing_masks = list(missing)
         missing_subsets = torch.stack(list(missing.values())).to(device)
-        n_missing = len(missing_masks)
-        entropy_values = torch.empty(
-            (n_missing, n_datasets), dtype=torch.float64, device=device
+        entropy_values, _ = self._estimate_uncached(
+            missing_subsets,
+            missing_masks,
+            return_local=False,
         )
-
-        for dataset_index, dataset in enumerate(self.data.datasets):
-            mode = choose_count_mode(
-                order=order,
-                n_subsets=n_missing,
-                n_samples=dataset.shape[0],
-                requested=self.count_mode,
-                dense_state_limit=self.dense_state_limit,
-                dense_memory_limit_bytes=self.dense_memory_limit_bytes,
-            )
-
-            if mode == "dense":
-                codes = encode_binary_states(dataset, missing_subsets)
-                counts = dense_counts_from_codes(codes, 1 << order)
-                values = self.estimator.entropy_from_dense(counts)
-            else:
-                if self.data.n_variables <= 63:
-                    row_codes = self._row_codes[dataset_index]
-                    if row_codes is None:
-                        row_codes = encode_binary_rows(dataset)
-                        self._row_codes[dataset_index] = row_codes
-                    codes = mask_binary_rows(row_codes, missing_masks)
-                else:
-                    codes = encode_binary_states(dataset, missing_subsets)
-                counts = sparse_counts_from_codes(codes)
-                values = self.estimator.entropy_from_sparse(counts)
-
-            entropy_values[:, dataset_index] = values.to(device)
 
         for row, mask in enumerate(missing_masks):
             value = entropy_values[row]
@@ -139,3 +195,70 @@ class CountingEntropyProvider:
                 result[position] = value
 
         return result
+
+    def entropy_with_local(
+        self,
+        subsets: torch.Tensor,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+        """Estimate global and sample-resolved entropy for variable sets.
+
+        Local values are aligned with the original sample order of each dataset.
+        For the empirical estimator they are Shannon surprisals in bits. An
+        estimator may define another documented decomposition; estimators that
+        do not support local values raise :class:`NotImplementedError`.
+
+        Parameters
+        ----------
+        subsets
+            Integer variable sets with shape ``[B, K]`` or ``[K]``.
+
+        Returns
+        -------
+        tuple
+            ``(entropy, local_entropy)``. ``entropy`` has shape ``[B, D]``.
+            ``local_entropy`` is a tuple with one tensor per dataset, each with
+            shape ``[B, T_d]``. Datasets with unequal sample counts remain
+            separate; no padding or reshaping of observations is introduced.
+
+        Notes
+        -----
+        Persistent caching is intentionally limited to global entropy values.
+        Local arrays scale as ``variable sets × samples`` and are therefore
+        kept only for the duration of the requesting batch.
+        """
+        subsets = canonicalize_subsets(subsets, self.data.n_variables)
+        masks = _masks_from_canonical_subsets(subsets)
+        device = self.data.device
+
+        unique_masks: list[int] = []
+        unique_subsets: list[torch.Tensor] = []
+        unique_index: dict[int, int] = {}
+        inverse_positions: list[int] = []
+
+        for mask, subset in zip(masks, subsets, strict=True):
+            index = unique_index.get(mask)
+            if index is None:
+                index = len(unique_masks)
+                unique_index[mask] = index
+                unique_masks.append(mask)
+                unique_subsets.append(subset)
+            inverse_positions.append(index)
+
+        stacked_subsets = torch.stack(unique_subsets).to(device)
+        entropy_unique, local_unique = self._estimate_uncached(
+            stacked_subsets,
+            unique_masks,
+            return_local=True,
+        )
+        assert local_unique is not None
+
+        for row, mask in enumerate(unique_masks):
+            self.cache.put(mask, entropy_unique[row])
+
+        if len(unique_masks) == len(masks):
+            return entropy_unique, local_unique
+
+        gather_index = torch.tensor(inverse_positions, dtype=torch.long, device=device)
+        entropy = entropy_unique.index_select(0, gather_index)
+        local = tuple(values.index_select(0, gather_index) for values in local_unique)
+        return entropy, local
