@@ -117,7 +117,7 @@ def prepare_data(
     return prepare_discrete_data(data, device=device)
 
 
-def entropy(
+def estimate_entropy(
     data: Any,
     variable_sets: Any,
     *,
