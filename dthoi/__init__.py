@@ -3,11 +3,19 @@
 from .batch import multi_order_measures
 from .data import PreparedDiscreteData, prepare_discrete_data
 from .entropy.base import CountingEntropyProvider
-from .entropy.estimators import MillerMadowEstimator, PluginEstimator, resolve_estimator
+from .entropy.cache import EntropyCache
+from .entropy.estimators import (
+    CountEntropyEstimator,
+    MillerMadowEstimator,
+    PluginEstimator,
+    resolve_estimator,
+)
 from .measures.core import nplets_measures
 
 __all__ = [
+    "CountEntropyEstimator",
     "CountingEntropyProvider",
+    "EntropyCache",
     "MillerMadowEstimator",
     "PluginEstimator",
     "PreparedDiscreteData",
