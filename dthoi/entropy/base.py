@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-from collections import OrderedDict
-
 import torch
 
-from ..data import PreparedDiscreteData, prepare_discrete_data
-from ..subsets import canonicalize_subsets, masks_from_subsets
+from ..data import DiscreteInput, PreparedDiscreteData, prepare_discrete_data
+from ..subsets import _masks_from_canonical_subsets, canonicalize_subsets
 from .cache import EntropyCache
 from .counting import (
     CountMode,
@@ -20,11 +18,29 @@ from .estimators import CountEntropyEstimator, resolve_estimator
 
 
 class CountingEntropyProvider:
-    """Entropy backend for binary samples using exact state counting."""
+    """Exact-counting entropy backend for binary discrete observations.
+
+    Parameters
+    ----------
+    X
+        Discrete observations accepted by :func:`prepare_discrete_data`.
+    estimator
+        Entropy estimator name or estimator instance.
+    count_mode
+        ``"dense"``, ``"sparse"``, or ``"auto"`` counting strategy.
+    cache
+        Optional entropy cache shared across calls.
+    device
+        Destination device for the prepared observations.
+    dense_state_limit
+        Maximum state-space cardinality considered by automatic dense counting.
+    dense_memory_limit_bytes
+        Maximum estimated dense working memory considered by automatic counting.
+    """
 
     def __init__(
         self,
-        X: PreparedDiscreteData | torch.Tensor | list[torch.Tensor],
+        X: DiscreteInput,
         *,
         estimator: str | CountEntropyEstimator = "plugin",
         count_mode: CountMode = "auto",
@@ -33,11 +49,8 @@ class CountingEntropyProvider:
         dense_state_limit: int = 1 << 16,
         dense_memory_limit_bytes: int = 256 * 1024 * 1024,
     ):
-        self.data = X if isinstance(X, PreparedDiscreteData) else prepare_discrete_data(X, device=device)
-        if device is not None and isinstance(X, PreparedDiscreteData):
-            target = torch.device(device)
-            if any(ds.device != target for ds in X.datasets):
-                self.data = PreparedDiscreteData(tuple(ds.to(target) for ds in X.datasets), X.n_variables)
+        """Prepare data, estimator, counting policy, and cache state."""
+        self.data: PreparedDiscreteData = prepare_discrete_data(X, device=device)
         self.estimator = resolve_estimator(estimator)
         self.count_mode = count_mode
         self.cache = cache if cache is not None else EntropyCache()
@@ -46,63 +59,80 @@ class CountingEntropyProvider:
         self._row_codes: list[torch.Tensor | None] = [None] * self.data.n_datasets
 
     def entropy(self, subsets: torch.Tensor) -> torch.Tensor:
+        """Estimate entropy for a fixed-order batch of variable subsets.
+
+        Parameters
+        ----------
+        subsets
+            Integer subset indices with shape ``[B, K]`` or ``[K]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Entropies in bits with shape ``[B, D]``, where ``D`` is the number
+            of prepared datasets.
+        """
         subsets = canonicalize_subsets(subsets, self.data.n_variables)
-        masks = masks_from_subsets(subsets)
-        B, K = subsets.shape
-        D = self.data.n_datasets
+        masks = _masks_from_canonical_subsets(subsets)
+        batch_size, order = subsets.shape
+        n_datasets = self.data.n_datasets
         device = self.data.device
 
-        result = torch.empty((B, D), dtype=torch.float64, device=device)
+        result = torch.empty((batch_size, n_datasets), dtype=torch.float64, device=device)
 
-        missing: OrderedDict[int, torch.Tensor] = OrderedDict()
+        missing: dict[int, torch.Tensor] = {}
         positions: dict[int, list[int]] = {}
 
-        for pos, (mask, subset) in enumerate(zip(masks, subsets, strict=True)):
-            positions.setdefault(mask, []).append(pos)
+        for position, (mask, subset) in enumerate(zip(masks, subsets, strict=True)):
+            positions.setdefault(mask, []).append(position)
             cached = self.cache.get(mask)
             if cached is not None:
-                result[pos] = cached.to(device=device, dtype=torch.float64)
+                result[position] = cached.to(device=device, dtype=torch.float64)
             elif mask not in missing:
                 missing[mask] = subset
 
-        if missing:
-            missing_masks = list(missing.keys())
-            missing_subsets = torch.stack(list(missing.values())).to(device)
-            U = len(missing_masks)
-            entropy_values = torch.empty((U, D), dtype=torch.float64, device=device)
+        if not missing:
+            return result
 
-            for d, dataset in enumerate(self.data.datasets):
-                mode = choose_count_mode(
-                    order=K,
-                    n_subsets=U,
-                    n_samples=dataset.shape[0],
-                    requested=self.count_mode,
-                    dense_state_limit=self.dense_state_limit,
-                    dense_memory_limit_bytes=self.dense_memory_limit_bytes,
-                )
+        missing_masks = list(missing)
+        missing_subsets = torch.stack(list(missing.values())).to(device)
+        n_missing = len(missing_masks)
+        entropy_values = torch.empty(
+            (n_missing, n_datasets), dtype=torch.float64, device=device
+        )
 
-                if mode == "dense":
-                    codes = encode_binary_states(dataset, missing_subsets)
-                    counts = dense_counts_from_codes(codes, 1 << K)
-                    values = self.estimator.entropy_from_dense(counts.values)
+        for dataset_index, dataset in enumerate(self.data.datasets):
+            mode = choose_count_mode(
+                order=order,
+                n_subsets=n_missing,
+                n_samples=dataset.shape[0],
+                requested=self.count_mode,
+                dense_state_limit=self.dense_state_limit,
+                dense_memory_limit_bytes=self.dense_memory_limit_bytes,
+            )
+
+            if mode == "dense":
+                codes = encode_binary_states(dataset, missing_subsets)
+                counts = dense_counts_from_codes(codes, 1 << order)
+                values = self.estimator.entropy_from_dense(counts)
+            else:
+                if self.data.n_variables <= 63:
+                    row_codes = self._row_codes[dataset_index]
+                    if row_codes is None:
+                        row_codes = encode_binary_rows(dataset)
+                        self._row_codes[dataset_index] = row_codes
+                    codes = mask_binary_rows(row_codes, missing_masks)
                 else:
-                    if self.data.n_variables <= 63:
-                        row_codes = self._row_codes[d]
-                        if row_codes is None:
-                            row_codes = encode_binary_rows(dataset)
-                            self._row_codes[d] = row_codes
-                        codes = mask_binary_rows(row_codes, missing_masks)
-                    else:
-                        codes = encode_binary_states(dataset, missing_subsets)
-                    counts = sparse_counts_from_codes(codes)
-                    values = self.estimator.entropy_from_sparse(counts.values)
+                    codes = encode_binary_states(dataset, missing_subsets)
+                counts = sparse_counts_from_codes(codes)
+                values = self.estimator.entropy_from_sparse(counts)
 
-                entropy_values[:, d] = values.to(device)
+            entropy_values[:, dataset_index] = values.to(device)
 
-            for row, mask in enumerate(missing_masks):
-                value = entropy_values[row]
-                self.cache.put(mask, value)
-                for pos in positions[mask]:
-                    result[pos] = value
+        for row, mask in enumerate(missing_masks):
+            value = entropy_values[row]
+            self.cache.put(mask, value)
+            for position in positions[mask]:
+                result[position] = value
 
         return result
