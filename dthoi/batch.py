@@ -33,10 +33,13 @@ def multi_order_measures(
     entropy provider and cache. Completed batches are moved to CPU by the
     default collector.
 
+    This is an internal execution function. Scientific users should normally
+    call :func:`dthoi.analyze_orders`.
+
     Parameters
     ----------
     X
-        Discrete observations accepted by :func:`prepare_discrete_data`.
+        Discrete observations accepted by :func:`dthoi.prepare_data`.
     min_order, max_order
         Inclusive subset-order range. ``max_order=None`` uses all variables.
     estimator
