@@ -100,26 +100,52 @@ def dense_counts_from_codes(codes: torch.Tensor, n_states: int) -> torch.Tensor:
     return counts
 
 
-def sparse_counts_from_codes(codes: torch.Tensor) -> list[torch.Tensor]:
-    """Count only observed states for each encoded subset.
+def sparse_counts_from_codes(
+    codes: torch.Tensor,
+    *,
+    return_inverse: bool = False,
+) -> list[torch.Tensor] | tuple[list[torch.Tensor], list[torch.Tensor]]:
+    """Count observed states for each encoded subset.
 
     Parameters
     ----------
     codes
         Integer state codes with shape ``[B, T]``.
+    return_inverse
+        If ``True``, also return one index vector per subset mapping every
+        observation to its observed-state count. The mapping preserves the
+        original sample order and is used to compute local entropy values
+        without constructing Python state dictionaries.
 
     Returns
     -------
-    list[torch.Tensor]
-        One ``torch.int64`` count vector per subset. Vector lengths equal the
-        number of observed states and may differ between subsets.
+    list[torch.Tensor] or tuple[list[torch.Tensor], list[torch.Tensor]]
+        One ``torch.int64`` count vector per subset. When ``return_inverse`` is
+        enabled, the second list contains ``[T]`` state-index vectors aligned
+        with the original observations.
     """
-    values: list[torch.Tensor] = []
+    counts_values: list[torch.Tensor] = []
+    inverse_values: list[torch.Tensor] = []
+
     for row in codes:
-        sorted_codes = torch.sort(row).values
-        _, counts = torch.unique_consecutive(sorted_codes, return_counts=True)
-        values.append(counts)
-    return values
+        if return_inverse:
+            sorted_codes, permutation = torch.sort(row)
+            _, inverse_sorted, counts = torch.unique_consecutive(
+                sorted_codes,
+                return_inverse=True,
+                return_counts=True,
+            )
+            inverse = torch.empty_like(inverse_sorted)
+            inverse[permutation] = inverse_sorted
+            inverse_values.append(inverse)
+        else:
+            sorted_codes = torch.sort(row).values
+            _, counts = torch.unique_consecutive(sorted_codes, return_counts=True)
+        counts_values.append(counts)
+
+    if return_inverse:
+        return counts_values, inverse_values
+    return counts_values
 
 
 def choose_count_mode(
