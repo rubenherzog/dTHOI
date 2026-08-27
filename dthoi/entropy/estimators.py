@@ -27,12 +27,15 @@ class PluginEstimator(CountEntropyEstimator):
 
     def entropy_from_dense(self, counts: torch.Tensor) -> torch.Tensor:
         counts = counts.to(dtype=torch.float64)
-        totals = counts.sum(dim=-1, keepdim=True)
+        totals = counts.sum(dim=-1)
         if bool(torch.any(totals <= 0)):
             raise ValueError("Counts must contain at least one observation per row.")
-        probs = counts / totals
-        terms = torch.where(probs > 0, -probs * torch.log2(probs), torch.zeros_like(probs))
-        return terms.sum(dim=-1)
+
+        # H = log2(T) - (1/T) * sum_c c log2(c). This is algebraically
+        # identical to the probability form while avoiding large probability
+        # and term tensors in the dense path.
+        sum_c_log2_c = torch.special.xlogy(counts, counts).sum(dim=-1) / math.log(2.0)
+        return torch.log2(totals) - sum_c_log2_c / totals
 
 
 class MillerMadowEstimator(CountEntropyEstimator):
