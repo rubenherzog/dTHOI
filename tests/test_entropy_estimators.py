@@ -32,6 +32,23 @@ def _balanced_four_variable_data() -> torch.Tensor:
     return torch.tensor(rows + rows, dtype=torch.uint8)
 
 
+def _local_four_variable_data() -> torch.Tensor:
+    """Return repeated and singleton states for corrected local-value tests."""
+    return torch.tensor(
+        [
+            [0, 0, 0, 0],
+            [0, 0, 0, 1],
+            [0, 0, 1, 0],
+            [0, 1, 0, 0],
+            [1, 0, 0, 0],
+            [1, 1, 0, 0],
+            [1, 0, 1, 0],
+            [1, 0, 0, 1],
+        ],
+        dtype=torch.uint8,
+    )
+
+
 @pytest.mark.parametrize(
     ("estimator", "expected"),
     [
@@ -87,6 +104,91 @@ def test_all_new_estimators_are_batched_and_dense_sparse_equivalent():
         torch.testing.assert_close(dense_values, sparse_values, rtol=0.0, atol=1e-12)
 
 
+def test_schurmann_local_values_match_state_additive_formula():
+    """Validate Schürmann local values independently from the global reduction."""
+    counts = torch.tensor([[3, 1]], dtype=torch.int64)
+    codes = torch.tensor([[0, 0, 0, 1]], dtype=torch.int64)
+    estimator = SchurmannEstimator()
+    local = estimator.local_from_dense(counts, codes)
+
+    total = torch.tensor(4.0, dtype=torch.float64)
+    expected_by_count = []
+    for count in (3.0, 1.0):
+        n = torch.tensor(count, dtype=torch.float64)
+        integral = 0.5 * (
+            torch.special.digamma((n + 1.0) / 2.0)
+            - torch.special.digamma(n / 2.0)
+        )
+        signed = integral if int(count) % 2 else -integral
+        expected_by_count.append(
+            (
+                torch.special.digamma(total)
+                - torch.special.digamma(n)
+                + signed
+            )
+            / math.log(2.0)
+        )
+    expected = torch.stack(
+        [expected_by_count[0], expected_by_count[0], expected_by_count[0], expected_by_count[1]]
+    ).unsqueeze(0)
+    torch.testing.assert_close(local, expected, rtol=0.0, atol=1e-12)
+    torch.testing.assert_close(
+        local.mean(dim=1),
+        estimator.entropy_from_dense(counts, n_states=2),
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+
+def test_chao_shen_local_values_match_horvitz_thompson_formula():
+    """Validate Chao-Shen observation contributions from the published estimator."""
+    counts = torch.tensor([[3, 1]], dtype=torch.int64)
+    codes = torch.tensor([[0, 0, 0, 1]], dtype=torch.int64)
+    estimator = ChaoShenEstimator()
+    local = estimator.local_from_dense(counts, codes)
+
+    total = 4.0
+    coverage = 1.0 - 1.0 / total
+    expected_by_count = []
+    for count in (3.0, 1.0):
+        adjusted = coverage * count / total
+        detection = 1.0 - (1.0 - adjusted) ** total
+        expected_by_count.append(
+            -coverage * math.log2(adjusted) / detection
+        )
+    expected = torch.tensor(
+        [[expected_by_count[0], expected_by_count[0], expected_by_count[0], expected_by_count[1]]],
+        dtype=torch.float64,
+    )
+    torch.testing.assert_close(local, expected, rtol=0.0, atol=1e-12)
+    torch.testing.assert_close(
+        local.mean(dim=1),
+        estimator.entropy_from_dense(counts, n_states=2),
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+
+@pytest.mark.parametrize("name", ["schurmann", "chao_shen"])
+def test_supported_corrected_local_entropy_is_batched_dense_sparse_and_mean_consistent(name):
+    """Preserve batch rows and exact global means in both counting paths."""
+    data = _local_four_variable_data()
+    subsets = torch.tensor([[0, 1, 2], [1, 2, 3]])
+
+    dense_provider = CountingEntropyProvider(data, estimator=name, count_mode="dense")
+    sparse_provider = CountingEntropyProvider(data, estimator=name, count_mode="sparse")
+    dense_entropy, dense_local = dense_provider.entropy_with_local(subsets)
+    sparse_entropy, sparse_local = sparse_provider.entropy_with_local(subsets)
+
+    assert dense_local[0].shape == (2, data.shape[0])
+    assert sparse_local[0].shape == (2, data.shape[0])
+    torch.testing.assert_close(dense_entropy, sparse_entropy, rtol=0.0, atol=1e-12)
+    torch.testing.assert_close(dense_local[0], sparse_local[0], rtol=0.0, atol=1e-12)
+    torch.testing.assert_close(
+        dense_local[0].mean(dim=1), dense_entropy[:, 0], rtol=0.0, atol=1e-12
+    )
+
+
 def test_shrinkage_includes_unobserved_nominal_states_analytically():
     """Changing Q changes shrinkage without materializing zero-count states."""
     counts = torch.tensor([[4, 4]], dtype=torch.int64)
@@ -107,8 +209,12 @@ def test_shrinkage_includes_unobserved_nominal_states_analytically():
 def test_chao_shen_is_undefined_when_every_observation_is_a_singleton():
     """Do not replace zero estimated coverage with an ad-hoc fallback."""
     counts = torch.ones((1, 8), dtype=torch.int64)
-    value = ChaoShenEstimator().entropy_from_dense(counts, n_states=8)
+    codes = torch.arange(8, dtype=torch.int64).unsqueeze(0)
+    estimator = ChaoShenEstimator()
+    value = estimator.entropy_from_dense(counts, n_states=8)
+    local = estimator.local_from_dense(counts, codes)
     assert torch.isnan(value).all()
+    assert torch.isnan(local).all()
 
 
 def test_ansb_separates_observed_coincidences_from_nominal_support():
@@ -160,20 +266,10 @@ def test_resolver_exposes_the_five_new_scientific_names():
     assert isinstance(resolve_estimator("ansb"), AsymptoticNsbEstimator)
 
 
-def test_new_estimators_do_not_invent_local_entropy_values():
-    """Reject local requests when the estimator has no defined pointwise form."""
-    data = torch.tensor(
-        [
-            [0, 0, 0],
-            [0, 0, 1],
-            [0, 1, 0],
-            [1, 0, 0],
-            [1, 1, 0],
-            [1, 0, 1],
-        ],
-        dtype=torch.uint8,
-    )
-    for name in ("schurmann", "shrinkage", "chao_shen", "pitman_yor", "ansb"):
+def test_only_estimators_without_canonical_observation_decomposition_reject_local_values():
+    """Reject local requests that would require arbitrary redistribution."""
+    data = _local_four_variable_data()[:, :3]
+    for name in ("shrinkage", "pitman_yor", "ansb"):
         provider = CountingEntropyProvider(data, estimator=name, count_mode="sparse")
         with pytest.raises(NotImplementedError, match="does not define local values"):
             provider.entropy_with_local(torch.tensor([[0, 1, 2]]))
@@ -181,19 +277,7 @@ def test_new_estimators_do_not_invent_local_entropy_values():
 
 def test_public_entropy_api_preserves_batch_and_dataset_axes():
     """Keep the scientific API shape contract for all five estimators."""
-    first = torch.tensor(
-        [
-            [0, 0, 0, 0],
-            [0, 0, 0, 1],
-            [0, 0, 1, 0],
-            [0, 1, 0, 0],
-            [1, 0, 0, 0],
-            [1, 1, 0, 0],
-            [1, 0, 1, 0],
-            [1, 0, 0, 1],
-        ],
-        dtype=torch.uint8,
-    )
+    first = _local_four_variable_data()
     second = first[:6]
     variable_sets = [[0, 1, 2], [1, 2, 3]]
 
@@ -238,6 +322,39 @@ def test_new_estimators_flow_through_shared_information_measure_definitions():
             rtol=0.0,
             atol=1e-12,
         )
+
+
+@pytest.mark.parametrize("name", ["schurmann", "chao_shen"])
+def test_corrected_local_information_measures_average_to_global_values(name):
+    """Propagate supported corrected locals through shared TC/DTC/O/S equations."""
+    data = _balanced_four_variable_data()
+    result = dthoi.information_measures(
+        data,
+        [[0, 1, 2], [1, 2, 3]],
+        entropy_estimator=name,
+        local_values=True,
+        max_local_values_per_batch=data.shape[0],
+    )
+    assert result.local is not None
+    assert result.local.values[0].shape == (2, data.shape[0], 4)
+    torch.testing.assert_close(
+        result.local.values[0].mean(dim=1),
+        result.values[:, 0, :],
+        rtol=0.0,
+        atol=1e-12,
+    )
+    torch.testing.assert_close(
+        result.local.o_information[0],
+        result.local.total_correlation[0] - result.local.dual_total_correlation[0],
+        rtol=0.0,
+        atol=1e-12,
+    )
+    torch.testing.assert_close(
+        result.local.s_information[0],
+        result.local.total_correlation[0] + result.local.dual_total_correlation[0],
+        rtol=0.0,
+        atol=1e-12,
+    )
 
 
 def test_analyze_orders_preserves_generated_batch_bound_with_new_estimator():
