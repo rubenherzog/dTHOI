@@ -19,7 +19,7 @@ def _distribution_from_exact_samples(X: torch.Tensor):
 
 
 @pytest.mark.parametrize("kind", ["independent", "redundant", "parity"])
-def test_o_information_matches_dit(kind):
+def test_core_measures_match_dit(kind):
     k = 4
     if kind == "independent":
         X = torch.tensor(list(itertools.product([0, 1], repeat=k)), dtype=torch.uint8)
@@ -32,6 +32,19 @@ def test_o_information_matches_dit(kind):
         X = torch.tensor(rows, dtype=torch.uint8)
 
     dist = _distribution_from_exact_samples(X)
-    expected = dit.multivariate.o_information(dist)
-    actual = nplets_measures(X, torch.tensor([list(range(k))]), count_mode="dense")[0, 0, 2].item()
-    assert abs(actual - expected) < 1e-12
+    expected = torch.tensor(
+        [
+            dit.multivariate.total_correlation(dist),
+            dit.multivariate.dual_total_correlation(dist),
+            dit.multivariate.o_information(dist),
+            dit.multivariate.s_information(dist),
+        ],
+        dtype=torch.float64,
+    )
+    actual = nplets_measures(
+        X,
+        torch.tensor([list(range(k))]),
+        count_mode="dense",
+    )[0, 0]
+
+    torch.testing.assert_close(actual.cpu(), expected, rtol=0.0, atol=1e-12)
