@@ -1,4 +1,3 @@
-import numpy as np
 import pytest
 import torch
 
@@ -6,7 +5,7 @@ from dthoi.data import prepare_discrete_data
 
 
 def test_prepare_single_dataset():
-    X = np.array([[0, 1], [1, 0], [1, 1]])
+    X = torch.tensor([[0, 1], [1, 0], [1, 1]])
     data = prepare_discrete_data(X)
     assert data.n_datasets == 1
     assert data.n_variables == 2
@@ -32,6 +31,12 @@ def test_prepare_ragged_datasets():
     ]
     data = prepare_discrete_data(X)
     assert data.sample_counts == (2, 3)
+
+
+def test_prepare_reuses_already_prepared_data():
+    data = prepare_discrete_data(torch.tensor([[0, 1], [1, 0]]))
+    assert prepare_discrete_data(data) is data
+    assert data.to("cpu") is data
 
 
 def test_reject_nonbinary_values():
