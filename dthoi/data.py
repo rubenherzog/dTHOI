@@ -8,7 +8,7 @@ import torch
 
 
 @dataclass(frozen=True)
-class PreparedDiscreteData:
+class DiscreteData:
     """Canonical collection of discrete datasets.
 
     Each dataset is stored as a contiguous ``torch.uint8`` tensor with shape
@@ -42,7 +42,7 @@ class PreparedDiscreteData:
         """Device shared by all datasets."""
         return self.datasets[0].device
 
-    def to(self, device: torch.device | str) -> PreparedDiscreteData:
+    def to(self, device: torch.device | str) -> DiscreteData:
         """Return this collection on ``device``.
 
         The existing object is returned when all datasets already reside on the
@@ -51,13 +51,13 @@ class PreparedDiscreteData:
         target = torch.device(device)
         if all(dataset.device == target for dataset in self.datasets):
             return self
-        return PreparedDiscreteData(
+        return DiscreteData(
             tuple(dataset.to(target) for dataset in self.datasets),
             self.n_variables,
         )
 
 
-DiscreteInput: TypeAlias = PreparedDiscreteData | torch.Tensor | Sequence[torch.Tensor]
+DiscreteInput: TypeAlias = DiscreteData | torch.Tensor | Sequence[torch.Tensor]
 
 
 def _as_dataset_list(X: object) -> list[torch.Tensor]:
@@ -91,8 +91,11 @@ def prepare_discrete_data(
     *,
     device: torch.device | str | None = None,
     validate_binary: bool = True,
-) -> PreparedDiscreteData:
+) -> DiscreteData:
     """Normalize discrete observations into the canonical Torch representation.
+
+    This function is used internally by the high-level dTHOI API. Most users
+    should call :func:`dthoi.prepare_data` instead.
 
     Parameters
     ----------
@@ -109,7 +112,7 @@ def prepare_discrete_data(
 
     Returns
     -------
-    PreparedDiscreteData
+    DiscreteData
         Contiguous ``torch.uint8`` datasets sharing one device and variable
         dimension.
 
@@ -119,7 +122,7 @@ def prepare_discrete_data(
         If the input is empty, has an unsupported shape, mixes variable counts,
         or contains non-binary values while validation is enabled.
     """
-    if isinstance(X, PreparedDiscreteData):
+    if isinstance(X, DiscreteData):
         return X if device is None else X.to(device)
 
     datasets = _as_dataset_list(X)
@@ -148,4 +151,4 @@ def prepare_discrete_data(
         prepared.append(dataset.to(device=target, dtype=torch.uint8).contiguous())
 
     assert n_variables is not None
-    return PreparedDiscreteData(tuple(prepared), n_variables)
+    return DiscreteData(tuple(prepared), n_variables)
