@@ -8,7 +8,6 @@ version = "0.1.0.dev0"
 description = "High-throughput higher-order information analysis for discrete multivariate data"
 requires-python = ">=3.10"
 dependencies = [
-    "numpy>=1.24",
     "torch>=2.0",
 ]
 
