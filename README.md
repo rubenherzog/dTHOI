@@ -40,13 +40,13 @@ The returned measures are Torch tensors with one row per variable set and one co
 ## Entropy
 
 ```python
-h = dthoi.entropy(data, variable_sets)
+h = dthoi.estimate_entropy(data, variable_sets)
 ```
 
 By default, dTHOI uses the empirical entropy estimator. A Miller–Madow correction is also available:
 
 ```python
-h = dthoi.entropy(
+h = dthoi.estimate_entropy(
     data,
     variable_sets,
     entropy_estimator="miller_madow",
@@ -60,7 +60,7 @@ For repeated analyses of the same observations, the data can be prepared once:
 ```python
 prepared = dthoi.prepare_data(data)
 
-h = dthoi.entropy(prepared, variable_sets)
+h = dthoi.estimate_entropy(prepared, variable_sets)
 results = dthoi.information_measures(prepared, variable_sets)
 ```
 
@@ -86,7 +86,7 @@ Results are returned in pieces so large combination spaces do not need to be eva
 The main user-facing functions are:
 
 - `prepare_data`: prepare one or more datasets for repeated analyses.
-- `entropy`: estimate Shannon entropy for selected variable sets.
+- `estimate_entropy`: estimate Shannon entropy for selected variable sets.
 - `information_measures`: calculate TC, DTC, O-information, and S-information.
 - `analyze_orders`: evaluate all variable combinations across a range of interaction orders.
 
