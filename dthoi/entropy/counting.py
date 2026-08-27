@@ -47,6 +47,37 @@ def encode_binary_states(data: torch.Tensor, subsets: torch.Tensor) -> torch.Ten
     return codes
 
 
+def encode_binary_rows(data: torch.Tensor) -> torch.Tensor:
+    """Encode complete binary samples into one exact int64 state per row.
+
+    For datasets with at most 63 variables, sparse subset states can then be
+    obtained by applying canonical subset masks instead of re-encoding each
+    subset bit by bit.
+    """
+
+    if data.ndim != 2:
+        raise ValueError("data must have shape [T, N].")
+
+    T, N = data.shape
+    if N > 63:
+        raise NotImplementedError("Single-word row encoding supports at most 63 variables.")
+
+    codes = torch.zeros(T, dtype=torch.int64, device=data.device)
+    for bit in range(N):
+        codes.bitwise_or_(data[:, bit].to(dtype=torch.int64) << bit)
+    return codes
+
+
+def mask_binary_rows(row_codes: torch.Tensor, subset_masks: list[int]) -> torch.Tensor:
+    """Apply canonical subset masks to pre-encoded binary rows."""
+
+    if row_codes.ndim != 1:
+        raise ValueError("row_codes must have shape [T].")
+
+    masks = torch.tensor(subset_masks, dtype=torch.int64, device=row_codes.device)
+    return row_codes.unsqueeze(0).bitwise_and(masks.unsqueeze(1))
+
+
 def dense_counts_from_codes(codes: torch.Tensor, n_states: int) -> DenseCounts:
     B = codes.shape[0]
     counts = torch.zeros((B, n_states), dtype=torch.int64, device=codes.device)
@@ -79,9 +110,16 @@ def choose_count_mode(
         raise ValueError("count_mode must be 'auto', 'dense', or 'sparse'.")
 
     n_states = 1 << order
-    dense_bytes = n_subsets * n_states * torch.tensor([], dtype=torch.int64).element_size()
 
-    if n_states > dense_state_limit or dense_bytes > dense_memory_limit_bytes:
+    # Dense counting is immediately followed by float64 entropy evaluation.
+    # Budget conservatively for int64 counts plus the principal float64 working
+    # tensors instead of considering the counts allocation alone.
+    count_bytes = torch.empty((), dtype=torch.int64).element_size()
+    float_bytes = torch.empty((), dtype=torch.float64).element_size()
+    bytes_per_state = count_bytes + 3 * float_bytes
+    dense_working_bytes = n_subsets * n_states * bytes_per_state
+
+    if n_states > dense_state_limit or dense_working_bytes > dense_memory_limit_bytes:
         return "sparse"
 
     # Dense counting is attractive when the potential state space is not much
