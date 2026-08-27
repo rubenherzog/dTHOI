@@ -92,7 +92,9 @@ results = dthoi.information_measures(
 )
 ```
 
-For empirical entropy, local values are built from Shannon surprisal. Miller–Madow local values use a uniform allocation of the scalar bias correction so that averaging local values exactly recovers the corrected global measure. The other entropy estimators do not currently expose local values because no unique pointwise decomposition is assumed. See `docs/local_values.md` for equations and conventions.
+Local values are supported for `"empirical"`, `"miller_madow"`, `"schurmann"`, and `"chao_shen"`. Empirical values are Shannon surprisals. Miller–Madow distributes its scalar correction uniformly over observations. Schürmann uses its canonical state-additive finite-sample contribution, and Chao–Shen uses the observation-level contribution induced by its Horvitz–Thompson state sum. In every supported case, averaging local entropy values reproduces the corresponding global entropy exactly, so the same property holds for local TC, DTC, O-information, and S-information.
+
+Shrinkage, fixed Pitman–Yor, and ANSB do not expose local values. Shrinkage and Pitman–Yor contain entropy contributions from unobserved states, while ANSB is a global coincidence-count functional; assigning these contributions to the observed samples would require an arbitrary convention. See `docs/local_values.md` for equations and details.
 
 ## Reusing prepared data
 
