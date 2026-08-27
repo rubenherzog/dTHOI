@@ -14,7 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
-reference = ["dit>=1.2"]
+reference = ["dit==2.2; python_version >= '3.11'"]
 
 [tool.setuptools.packages.find]
 include = ["dthoi*"]
