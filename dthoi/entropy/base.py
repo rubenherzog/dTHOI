@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from ..data import DiscreteInput, PreparedDiscreteData, prepare_discrete_data
+from ..data import DiscreteData, DiscreteInput, prepare_discrete_data
 from ..subsets import _masks_from_canonical_subsets, canonicalize_subsets
 from .cache import EntropyCache
 from .counting import (
@@ -50,7 +50,7 @@ class CountingEntropyProvider:
         dense_memory_limit_bytes: int = 256 * 1024 * 1024,
     ):
         """Prepare data, estimator, counting policy, and cache state."""
-        self.data: PreparedDiscreteData = prepare_discrete_data(X, device=device)
+        self.data: DiscreteData = prepare_discrete_data(X, device=device)
         self.estimator = resolve_estimator(estimator)
         self.count_mode = count_mode
         self.cache = cache if cache is not None else EntropyCache()
