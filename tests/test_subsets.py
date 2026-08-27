@@ -6,6 +6,7 @@ import torch
 from dthoi.subsets import (
     canonicalize_subsets,
     iter_subset_batches,
+    leave_one_out_subsets,
     mask_to_subset,
     subset_to_mask,
 )
@@ -27,6 +28,20 @@ def test_bitmask_roundtrip_is_order_independent():
     m2 = subset_to_mask((65, 8, 4, 0))
     assert m1 == m2
     assert mask_to_subset(m1) == (0, 4, 8, 65)
+
+
+def test_leave_one_out_subsets_preserves_expected_order():
+    subsets = torch.tensor([[0, 2, 4], [1, 3, 5]])
+    result = leave_one_out_subsets(subsets)
+    expected = torch.tensor([
+        [2, 4],
+        [0, 4],
+        [0, 2],
+        [3, 5],
+        [1, 5],
+        [1, 3],
+    ])
+    assert torch.equal(result, expected)
 
 
 def test_lazy_subset_batches_cover_space_once():
