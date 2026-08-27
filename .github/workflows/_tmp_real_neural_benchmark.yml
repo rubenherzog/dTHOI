@@ -29,6 +29,13 @@ jobs:
           python benchmarks/benchmark_mc_maze.py \
             --nwb-path "$NWB_PATH" \
             --output-dir benchmark-results
+      - name: Run convergence, binning, split-half, and isolated-memory benchmark
+        run: |
+          NWB_PATH="$(find data -type f -name '*.nwb' | head -n 1)"
+          test -n "$NWB_PATH"
+          python benchmarks/benchmark_mc_maze_stability.py \
+            --nwb-path "$NWB_PATH" \
+            --output-dir benchmark-results
       - uses: actions/upload-artifact@v4
         if: always()
         with:
