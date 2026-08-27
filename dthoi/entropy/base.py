@@ -21,7 +21,7 @@ class CountingEntropyProvider:
     """Exact-counting entropy backend for binary discrete observations.
 
     This is an internal execution component. Scientific users should normally
-    call :func:`dthoi.entropy` or :func:`dthoi.information_measures`.
+    call :func:`dthoi.estimate_entropy` or :func:`dthoi.information_measures`.
 
     Parameters
     ----------
