@@ -44,6 +44,30 @@ def _prepare_sparse_counts(
     return values, totals
 
 
+def _prepare_dense_local(
+    counts: torch.Tensor,
+    codes: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Prepare dense counts and gather each observation's state count."""
+    counts_f, totals = _prepare_dense_counts(counts)
+    if codes.ndim != 2 or codes.shape[0] != counts_f.shape[0]:
+        raise ValueError("codes must have shape [B, T] matching the count rows.")
+    observed_counts = torch.gather(counts_f, 1, codes.to(dtype=torch.long))
+    return counts_f, totals, observed_counts
+
+
+def _prepare_sparse_local(
+    counts: SparseCounts,
+    inverse: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Prepare packed counts and gather each observation's state count."""
+    if inverse.ndim != 2 or inverse.shape[0] != counts.batch_size:
+        raise ValueError("inverse must have shape [B, T] matching the count rows.")
+    values, totals = _prepare_sparse_counts(counts)
+    observed_counts = values[inverse.to(dtype=torch.long)]
+    return values, totals, observed_counts
+
+
 def _pack_dense_counts(counts: torch.Tensor) -> SparseCounts:
     """Pack positive entries of dense counts without Python row iteration."""
     positive = counts > 0
@@ -96,11 +120,51 @@ def _plugin_local_from_sparse(
     inverse: torch.Tensor,
 ) -> torch.Tensor:
     """Return empirical surprisal from packed counts in original sample order."""
-    if inverse.ndim != 2 or inverse.shape[0] != counts.batch_size:
-        raise ValueError("inverse must have shape [B, T] matching the count rows.")
-    values, totals = _prepare_sparse_counts(counts)
-    observed_counts = values[inverse.to(dtype=torch.long)]
+    _, totals, observed_counts = _prepare_sparse_local(counts, inverse)
     return torch.log2(totals).unsqueeze(1) - torch.log2(observed_counts)
+
+
+def _schurmann_point_values(
+    observed_counts: torch.Tensor,
+    totals: torch.Tensor,
+) -> torch.Tensor:
+    """Return Schürmann's per-observation state contribution in bits."""
+    integral = 0.5 * (
+        torch.special.digamma((observed_counts + 1.0) / 2.0)
+        - torch.special.digamma(observed_counts / 2.0)
+    )
+    signed_integral = torch.where(
+        observed_counts.to(dtype=torch.int64).remainder(2) == 1,
+        integral,
+        -integral,
+    )
+    return (
+        torch.special.digamma(totals)
+        - torch.special.digamma(observed_counts)
+        + signed_integral
+    ) / _LOG_2
+
+
+def _chao_shen_coverage(singletons: torch.Tensor, totals: torch.Tensor) -> torch.Tensor:
+    """Return Good-Turing sample coverage for each histogram."""
+    return 1.0 - singletons.to(dtype=torch.float64) / totals
+
+
+def _chao_shen_point_values(
+    observed_counts: torch.Tensor,
+    totals: torch.Tensor,
+    coverage: torch.Tensor,
+) -> torch.Tensor:
+    """Return per-observation Chao-Shen Horvitz-Thompson contributions in bits."""
+    probabilities = observed_counts / totals
+    adjusted = coverage * probabilities
+    detection = -torch.expm1(totals * torch.log1p(-adjusted))
+    local = -coverage * torch.log(adjusted) / detection / _LOG_2
+    return torch.where(
+        coverage > 0.0,
+        local,
+        torch.full_like(local, float("nan")),
+    )
 
 
 class CountEntropyEstimator(ABC):
@@ -189,8 +253,9 @@ class PluginEstimator(CountEntropyEstimator):
 
     def local_from_dense(self, counts: torch.Tensor, codes: torch.Tensor) -> torch.Tensor:
         """Calculate empirical surprisal for every observation in bits."""
-        counts_f, totals = _prepare_dense_counts(counts)
-        return _plugin_local_from_dense(counts_f, totals, codes)
+        counts_f, totals, observed_counts = _prepare_dense_local(counts, codes)
+        del counts_f
+        return torch.log2(totals).unsqueeze(1) - torch.log2(observed_counts)
 
     def local_from_sparse(
         self,
@@ -244,8 +309,8 @@ class MillerMadowEstimator(CountEntropyEstimator):
 
     def local_from_dense(self, counts: torch.Tensor, codes: torch.Tensor) -> torch.Tensor:
         """Calculate uniformly corrected local entropy values in bits."""
-        counts_f, totals = _prepare_dense_counts(counts)
-        local = _plugin_local_from_dense(counts_f, totals, codes)
+        counts_f, totals, observed_counts = _prepare_dense_local(counts, codes)
+        local = torch.log2(totals).unsqueeze(1) - torch.log2(observed_counts)
         observed = (counts_f > 0).sum(dim=-1).to(dtype=torch.float64)
         correction = (observed - 1.0) / (2.0 * totals * _LOG_2)
         return local + correction.unsqueeze(1)
@@ -292,18 +357,26 @@ class SchurmannEstimator(_PackedEstimator):
     functions, avoiding work proportional to each count. This is the same
     :math:`\xi=1/2` member implemented as ``entropy_2`` in ``dit``.
 
+    For observation ``t`` in state ``i``, dTHOI uses the state-additive local
+    contribution
+
+    .. math::
+
+        h_t = \frac{\psi(N)-\psi(n_i)-(-1)^{n_i}I(n_i)}{\ln 2},
+        \qquad I(n)=\int_0^1\frac{u^{n-1}}{1+u}\,du.
+
+    Averaging these values over observations exactly recovers ``hat H``. They
+    are estimator contributions, not surprisals derived from a normalized
+    corrected probability distribution.
+
     Assumptions
     -----------
     Samples are independent draws from a discrete distribution. Only observed
     state counts enter the estimate; the nominal state-space size is not used.
-
-    Notes
-    -----
-    No unique sample-resolved decomposition is assumed, so this estimator does
-    not expose local entropy values.
     """
 
     name = "schurmann"
+    supports_local_values = True
 
     def entropy_from_sparse(
         self,
@@ -315,21 +388,23 @@ class SchurmannEstimator(_PackedEstimator):
         del n_states
         values, totals = _prepare_sparse_counts(counts)
         row_ids = counts.row_ids
-        integral = 0.5 * (
-            torch.special.digamma((values + 1.0) / 2.0)
-            - torch.special.digamma(values / 2.0)
-        )
-        signed_integral = torch.where(
-            values.to(dtype=torch.int64).remainder(2) == 1,
-            integral,
-            -integral,
-        )
-        contribution = (values / totals[row_ids]) * (
-            torch.special.digamma(totals[row_ids])
-            - torch.special.digamma(values)
-            + signed_integral
-        )
-        return _segment_sum(contribution, row_ids, counts.batch_size) / _LOG_2
+        state_values = _schurmann_point_values(values, totals[row_ids])
+        weights = values / totals[row_ids]
+        return _segment_sum(weights * state_values, row_ids, counts.batch_size)
+
+    def local_from_dense(self, counts: torch.Tensor, codes: torch.Tensor) -> torch.Tensor:
+        """Calculate Schürmann state-additive local contributions in bits."""
+        _, totals, observed_counts = _prepare_dense_local(counts, codes)
+        return _schurmann_point_values(observed_counts, totals.unsqueeze(1))
+
+    def local_from_sparse(
+        self,
+        counts: SparseCounts,
+        inverse: torch.Tensor,
+    ) -> torch.Tensor:
+        """Calculate packed Schürmann local contributions in sample order."""
+        _, totals, observed_counts = _prepare_sparse_local(counts, inverse)
+        return _schurmann_point_values(observed_counts, totals.unsqueeze(1))
 
 
 class ShrinkageEstimator(_PackedEstimator):
@@ -352,7 +427,10 @@ class ShrinkageEstimator(_PackedEstimator):
     For a dTHOI binary variable set of order ``k``, ``Q=2**k`` is the nominal
     support. If the scientific system contains structural zeros, shrinkage
     toward a uniform distribution on all ``Q`` states is a modeling assumption.
-    No sample-resolved entropy decomposition is defined here.
+    A sample surprisal under the shrunken probabilities would average to an
+    empirical cross-entropy, not to this shrinkage entropy because unobserved
+    states receive positive mass. dTHOI therefore does not expose local values
+    for this estimator.
     """
 
     name = "shrinkage"
@@ -415,15 +493,31 @@ class ChaoShenEstimator(_PackedEstimator):
 
     Sample coverage is estimated as :math:`C=1-f_1/N`, where :math:`f_1` is
     the number of singleton states. Observed probabilities are rescaled by
-    ``C`` and corrected by their estimated probability of detection.
+    ``C`` and corrected by their estimated probability of detection. Writing
+    :math:`\tilde p_i=Cn_i/N`, the global estimator is
 
-    If every observation is a singleton, ``C=0`` and the estimator is
-    undefined; dTHOI returns ``NaN`` rather than modifying the singleton count
-    with an ad-hoc numerical fallback. No unique local entropy decomposition is
-    assumed.
+    .. math::
+
+        \hat H_{CS}=-\sum_i\frac{\tilde p_i\log_2\tilde p_i}
+        {1-(1-\tilde p_i)^N}.
+
+    Its state-additive form gives the local contribution for observation ``t``
+    in state ``i``:
+
+    .. math::
+
+        h_t=-\frac{C\log_2\tilde p_i}{1-(1-\tilde p_i)^N}.
+
+    Averaging over observations exactly recovers ``hat H_CS``. These values are
+    Horvitz-Thompson entropy contributions, not ordinary Shannon surprisals.
+
+    If every observation is a singleton, ``C=0`` and both global and local
+    estimates are undefined; dTHOI returns ``NaN`` rather than modifying the
+    singleton count with an ad-hoc numerical fallback.
     """
 
     name = "chao_shen"
+    supports_local_values = True
 
     def entropy_from_sparse(
         self,
@@ -438,16 +532,48 @@ class ChaoShenEstimator(_PackedEstimator):
         singletons = _segment_sum(
             (values == 1.0).to(dtype=torch.float64), row_ids, counts.batch_size
         )
-        coverage = 1.0 - singletons / totals
-        probabilities = values / totals[row_ids]
-        adjusted = coverage[row_ids] * probabilities
-        detection = -torch.expm1(totals[row_ids] * torch.log1p(-adjusted))
-        contribution = -torch.special.xlogy(adjusted, adjusted) / detection / _LOG_2
-        entropy = _segment_sum(contribution, row_ids, counts.batch_size)
+        coverage = _chao_shen_coverage(singletons, totals)
+        state_values = _chao_shen_point_values(
+            values,
+            totals[row_ids],
+            coverage[row_ids],
+        )
+        weights = values / totals[row_ids]
+        entropy = _segment_sum(weights * state_values, row_ids, counts.batch_size)
         return torch.where(
             coverage > 0.0,
             entropy,
             torch.full_like(entropy, float("nan")),
+        )
+
+    def local_from_dense(self, counts: torch.Tensor, codes: torch.Tensor) -> torch.Tensor:
+        """Calculate Chao-Shen Horvitz-Thompson contributions in bits."""
+        counts_f, totals, observed_counts = _prepare_dense_local(counts, codes)
+        singletons = (counts_f == 1.0).sum(dim=-1)
+        coverage = _chao_shen_coverage(singletons, totals)
+        return _chao_shen_point_values(
+            observed_counts,
+            totals.unsqueeze(1),
+            coverage.unsqueeze(1),
+        )
+
+    def local_from_sparse(
+        self,
+        counts: SparseCounts,
+        inverse: torch.Tensor,
+    ) -> torch.Tensor:
+        """Calculate packed Chao-Shen local contributions in sample order."""
+        values, totals, observed_counts = _prepare_sparse_local(counts, inverse)
+        singletons = _segment_sum(
+            (values == 1.0).to(dtype=torch.float64),
+            counts.row_ids,
+            counts.batch_size,
+        )
+        coverage = _chao_shen_coverage(singletons, totals)
+        return _chao_shen_point_values(
+            observed_counts,
+            totals.unsqueeze(1),
+            coverage.unsqueeze(1),
         )
 
 
@@ -468,10 +594,10 @@ class PitmanYorEstimator(_PackedEstimator):
     The default ``d=1/2, alpha=0`` is the fixed convention selected for the
     initial dTHOI implementation. The returned quantity is the posterior mean
     :math:`E[H(p)\mid n,d,\alpha]`, not the entropy of posterior-mean
-    probabilities. The prior permits unseen states and therefore does not use
-    the finite nominal cardinality ``Q=2**k``. Applying this countably infinite
-    model to a scientifically known finite support is consequently a modeling
-    assumption. No unique local entropy decomposition is defined.
+    probabilities. The posterior contains a Pitman-Yor tail over unobserved
+    symbols, so assigning that tail entropy to observed samples has no unique
+    pointwise rule. The prior also does not use the finite nominal cardinality
+    ``Q=2**k``. dTHOI therefore does not expose local values for this estimator.
     """
 
     name = "pitman_yor"
@@ -554,11 +680,12 @@ class AsymptoticNsbEstimator(_PackedEstimator):
 
     Notes
     -----
-    ANSB is a specialized entropy estimator for a large discrete support. Its
-    asymptotic assumptions generally do not hold for low-order binary marginals;
-    this limitation is especially important when combining entropies into
-    multivariate information measures. No local entropy decomposition is
-    defined.
+    ANSB is a global coincidence-count estimator depending on ``N`` and the
+    number of occupied states rather than on state-specific entropy terms. Any
+    exact assignment to individual observations would therefore require an
+    arbitrary redistribution of the scalar estimate. dTHOI does not expose
+    local values. Its asymptotic assumptions also generally fail for low-order
+    binary marginals used in multivariate information measures.
     """
 
     name = "ansb"
