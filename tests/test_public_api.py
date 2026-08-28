@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 import dthoi
@@ -5,33 +6,23 @@ import dthoi
 
 def _example_data() -> torch.Tensor:
     return torch.tensor(
-        [
-            [0, 0, 0, 0],
-            [0, 1, 1, 0],
-            [1, 0, 1, 1],
-            [1, 1, 0, 1],
-            [1, 1, 1, 0],
-        ],
+        [[0, 0, 0, 0], [0, 1, 1, 0], [1, 0, 1, 1], [1, 1, 0, 1], [1, 1, 1, 0]],
         dtype=torch.uint8,
     )
 
 
 def test_public_api_uses_scientific_names():
     expected = {
-        "DiscreteData",
-        "InformationMeasures",
-        "InteractionResults",
-        "LocalInformationMeasures",
-        "analyze_orders",
-        "estimate_entropy",
-        "information_measures",
-        "prepare_data",
+        "DiscreteData", "InformationMeasures", "InteractionResults",
+        "LocalInformationMeasures", "analyze_orders", "estimate_entropy",
+        "information_measures", "prepare_data",
     }
     assert set(dthoi.__all__) == expected
     assert not hasattr(dthoi, "CountingEntropyProvider")
     assert not hasattr(dthoi, "EntropyCache")
     assert not hasattr(dthoi, "nplets_measures")
     assert not hasattr(dthoi, "multi_order_measures")
+    assert not hasattr(dthoi, "bayesian_information_measures")
 
 
 def test_prepare_data_returns_reusable_discrete_data():
@@ -50,7 +41,6 @@ def test_entropy_accepts_plain_variable_sets():
 
 def test_information_measures_have_named_accessors():
     results = dthoi.information_measures(_example_data(), [[0, 1, 2], [1, 2, 3]])
-
     assert isinstance(results, dthoi.InformationMeasures)
     assert results.values.shape == (2, 1, 4)
     assert results.local is None
@@ -59,21 +49,46 @@ def test_information_measures_have_named_accessors():
     torch.testing.assert_close(results.o_information, results.values[..., 2])
     torch.testing.assert_close(results.s_information, results.values[..., 3])
     assert set(results.as_dict()) == {
-        "total_correlation",
-        "dual_total_correlation",
-        "o_information",
-        "s_information",
+        "total_correlation", "dual_total_correlation", "o_information", "s_information"
     }
+
+
+def test_information_measures_select_coherent_estimators_through_same_api():
+    results = dthoi.information_measures(
+        _example_data(), [[0, 1, 2], [1, 2, 3]], estimator="nsb"
+    )
+    assert isinstance(results, dthoi.InformationMeasures)
+    assert results.values.shape == (2, 1, 4)
+    assert results.local is None
+    torch.testing.assert_close(
+        results.o_information,
+        results.total_correlation - results.dual_total_correlation,
+        rtol=0.0, atol=1e-12,
+    )
+
+
+def test_information_measures_preserve_entropy_estimator_alias():
+    variable_sets = [[0, 1, 2], [1, 2, 3]]
+    legacy = dthoi.information_measures(
+        _example_data(), variable_sets, entropy_estimator="miller_madow"
+    ).values
+    unified = dthoi.information_measures(
+        _example_data(), variable_sets, estimator="miller_madow"
+    ).values
+    torch.testing.assert_close(legacy, unified, rtol=0.0, atol=0.0)
+
+
+def test_information_measures_reject_duplicate_estimator_arguments():
+    with pytest.raises(ValueError, match="Specify only one"):
+        dthoi.information_measures(
+            _example_data(), [0, 1, 2], estimator="empirical", entropy_estimator="empirical"
+        )
 
 
 def test_analyze_orders_returns_named_results():
     results = dthoi.analyze_orders(
-        _example_data(),
-        min_order=3,
-        max_order=3,
-        sets_per_batch=2,
+        _example_data(), min_order=3, max_order=3, sets_per_batch=2
     )
-
     assert results
     assert all(isinstance(result, dthoi.InteractionResults) for result in results)
     assert all(result.order == 3 for result in results)
@@ -85,11 +100,16 @@ def test_analyze_orders_returns_named_results():
 def test_prepared_data_can_be_reused_across_public_functions():
     prepared = dthoi.prepare_data(_example_data())
     variable_sets = [[0, 1, 2], [1, 2, 3]]
-
     direct_entropy = dthoi.estimate_entropy(_example_data(), variable_sets)
     prepared_entropy = dthoi.estimate_entropy(prepared, variable_sets)
     direct_information = dthoi.information_measures(_example_data(), variable_sets).values
     prepared_information = dthoi.information_measures(prepared, variable_sets).values
-
+    direct_coherent = dthoi.information_measures(
+        _example_data(), variable_sets, estimator="dirichlet_eb"
+    ).values
+    prepared_coherent = dthoi.information_measures(
+        prepared, variable_sets, estimator="dirichlet_eb"
+    ).values
     torch.testing.assert_close(direct_entropy, prepared_entropy, rtol=0.0, atol=1e-12)
     torch.testing.assert_close(direct_information, prepared_information, rtol=0.0, atol=1e-12)
+    torch.testing.assert_close(direct_coherent, prepared_coherent, rtol=0.0, atol=1e-12)

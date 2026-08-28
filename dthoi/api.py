@@ -1,9 +1,8 @@
 """User-facing API for dTHOI.
 
 The public API is intentionally phrased in scientific terms. Implementation
-concepts such as counting strategies, entropy caches, and execution providers
-remain internal so routine analyses can be expressed with a small set of
-functions.
+concepts such as counting strategies, entropy caches, estimator families, and
+execution providers remain internal.
 """
 
 from __future__ import annotations
@@ -16,11 +15,9 @@ import torch
 from .batch import multi_order_measures
 from .data import DiscreteData, prepare_discrete_data
 from .entropy.base import CountingEntropyProvider
-from .measures.core import (
-    DEFAULT_MAX_LOCAL_VALUES_PER_BATCH,
-    MeasureOutput,
-    nplets_measures,
-)
+from .measures.core import DEFAULT_MAX_LOCAL_VALUES_PER_BATCH
+from .measures.definitions import MeasureOutput
+from .measures.dispatch import measures_for_sets, resolve_public_estimator_argument
 
 
 @dataclass(frozen=True)
@@ -96,8 +93,6 @@ class InformationMeasures:
         standard dTHOI API the shape is ``[variable_sets, datasets, 4]``.
     local
         Optional sample-resolved values requested with ``local_values=True``.
-        The default is ``None`` so global analyses do not allocate arrays that
-        scale with sample count.
 
     Notes
     -----
@@ -217,9 +212,7 @@ def estimate_entropy(
     entropy_estimator
         Entropy estimator. Supported choices are ``"empirical"``,
         ``"miller_madow"``, ``"schurmann"``, ``"shrinkage"``,
-        ``"chao_shen"``, ``"pitman_yor"``, and ``"ansb"``. Pitman-Yor uses
-        the fixed convention ``d=1/2, alpha=0``. ANSB is intended for severe
-        undersampling and warns when ``N / 2**order > 0.1``.
+        ``"chao_shen"``, ``"pitman_yor"``, and ``"ansb"``.
     device
         Optional Torch device on which calculations should be performed.
 
@@ -230,11 +223,10 @@ def estimate_entropy(
 
     Notes
     -----
-    All estimators reuse the same exact state-counting paths. Shrinkage uses the
-    complete nominal binary support ``2**order``; if structural zeros are known
-    scientifically, this uniform-target assumption should be considered.
-    Chao-Shen returns ``NaN`` when every observation is a singleton. ANSB is
-    undefined without repeated observations and returns ``NaN`` in that case.
+    ``estimate_entropy`` accepts only estimators that define a standalone
+    ``variable set -> entropy`` operation. Complete-joint coherent estimators
+    such as ``"nsb"`` are selected through :func:`information_measures`, where
+    their parent-set context is available.
     """
     provider = CountingEntropyProvider(
         prepare_discrete_data(data, device=device),
@@ -248,76 +240,71 @@ def information_measures(
     data: Any,
     variable_sets: Any,
     *,
-    entropy_estimator: str = "empirical",
+    estimator: str | None = None,
+    entropy_estimator: str | None = None,
     device: torch.device | str | None = None,
     local_values: bool = False,
     max_local_values_per_batch: int = DEFAULT_MAX_LOCAL_VALUES_PER_BATCH,
 ) -> InformationMeasures:
-    """Calculate higher-order information measures for selected variable sets.
+    """Calculate TC, DTC, O-information, and S-information for variable sets.
 
-    The returned object provides total correlation, dual total correlation,
-    O-information, and S-information through descriptive properties rather than
-    requiring users to remember column positions. Sample-resolved values are
-    optional and are not calculated by default.
+    One ``estimator`` parameter selects the statistical method regardless of its
+    internal family. Entropy-based methods compose shared subset entropies;
+    coherent methods fit one complete-joint posterior and derive every required
+    marginal from that same model. Both routes return the same scientific result
+    object and use the same dTHOI definitions of TC, DTC, O-information, and
+    S-information.
 
     Parameters
     ----------
     data
         Binary observations or a prepared :class:`DiscreteData` object.
     variable_sets
-        Variable indices with shape ``[sets, order]`` or one set with shape
-        ``[order]``.
+        Variable indices with shape ``[sets, order]`` or one set ``[order]``.
+    estimator
+        Information estimator. Supported entropy-based choices are
+        ``"empirical"``, ``"miller_madow"``, ``"schurmann"``, ``"shrinkage"``,
+        ``"chao_shen"``, ``"pitman_yor"``, and ``"ansb"``. Coherent
+        complete-joint choices are ``"dirichlet_a1"``, ``"dirichlet_eb"``, and
+        ``"nsb"``. The default is ``"empirical"``.
     entropy_estimator
-        Global entropy estimator used consistently for every required subset
-        entropy. Supported choices are ``"empirical"``, ``"miller_madow"``,
-        ``"schurmann"``, ``"shrinkage"``, ``"chao_shen"``,
-        ``"pitman_yor"``, and ``"ansb"``.
+        Backward-compatible alias for ``estimator``. New code should use
+        ``estimator``. Supplying both arguments raises :class:`ValueError`.
     device
         Optional Torch device on which calculations should be performed.
     local_values
-        If ``True``, also calculate TC, DTC, O-information, and S-information
-        for every observation. Local values are defined for ``"empirical"``,
-        ``"miller_madow"``, ``"schurmann"``, and ``"chao_shen"``. Shrinkage,
-        Pitman-Yor, and ANSB raise :class:`NotImplementedError` because their
-        global entropy contains contributions that cannot be assigned to the
-        observed samples without an arbitrary convention.
+        If ``True``, also calculate sample-resolved values. Local values are
+        currently defined for ``"empirical"``, ``"miller_madow"``,
+        ``"schurmann"``, and ``"chao_shen"``. Estimators without an explicit
+        pointwise convention raise :class:`NotImplementedError`.
     max_local_values_per_batch
         Memory-control target for local calculations, expressed as the maximum
         approximate product ``variable sets × total samples`` processed at once.
-        Explicit variable sets are automatically subdivided when necessary.
-        Reducing this value lowers peak working memory; it does not alter the
-        returned scientific values.
 
     Returns
     -------
     InformationMeasures
-        Named access to the four global measures, each with shape
-        ``[variable_sets, datasets]``. When ``local_values=True``, ``.local``
-        contains one ``[variable_sets, samples_d]`` view per dataset and measure.
+        Named access to the four global measures in bits. Each has shape
+        ``[variable_sets, datasets]``. Optional local values remain separated by
+        dataset so unequal sample counts are never padded or merged.
 
     Notes
     -----
-    TC, DTC, O-information, and S-information are always derived from shared
-    subset entropies rather than separate estimation pipelines. Schürmann local
-    values are state-additive finite-sample contributions and Chao-Shen local
-    values are Horvitz-Thompson contributions; neither should be interpreted as
-    an ordinary Shannon surprisal. Their sample means nevertheless recover the
-    corresponding corrected global entropies exactly.
-
-    ANSB has the asymptotic requirement ``N/Q -> 0``; for binary singleton
-    marginals ``Q=2``, this requirement generally fails. ANSB-based multivariate
-    measures should therefore be interpreted only when the assumptions of every
-    entropy term involved are scientifically defensible.
-
-    Local arrays necessarily scale with the number of observations. dTHOI
-    controls temporary work in batches and does not persistently cache local
-    arrays, but the requested final local result still occupies
-    ``O(variable_sets × samples × measures)`` memory.
+    dTHOI always uses ``O = TC - DTC`` and ``S = TC + DTC``. For coherent
+    Dirichlet estimators, all entropy terms are posterior expectations under one
+    parent joint model, so TC and DTC remain non-negative apart from numerical
+    roundoff. Avoiding ``2**order`` state-space allocation removes an exponential
+    memory requirement but does not make severely undersampled high-order
+    distributions statistically identifiable.
     """
-    output = nplets_measures(
+    selected = resolve_public_estimator_argument(
+        estimator=estimator,
+        entropy_estimator=entropy_estimator,
+    )
+    output = measures_for_sets(
         prepare_discrete_data(data, device=device),
         torch.as_tensor(variable_sets),
-        estimator=entropy_estimator,
+        estimator=selected,
         count_mode="auto",
         local_values=local_values,
         max_local_values_per_batch=max_local_values_per_batch,
@@ -333,7 +320,8 @@ def analyze_orders(
     *,
     min_order: int = 3,
     max_order: int | None = None,
-    entropy_estimator: str = "empirical",
+    estimator: str | None = None,
+    entropy_estimator: str | None = None,
     sets_per_batch: int = 4096,
     device: torch.device | str | None = None,
     local_values: bool = False,
@@ -350,42 +338,35 @@ def analyze_orders(
     max_order
         Largest number of variables considered jointly. By default, all
         available variables are allowed.
+    estimator
+        Information estimator selected from the same choices accepted by
+        :func:`information_measures`. The default is ``"empirical"``.
     entropy_estimator
-        Global entropy estimator reused across all interaction orders. Supported
-        choices are ``"empirical"``, ``"miller_madow"``, ``"schurmann"``,
-        ``"shrinkage"``, ``"chao_shen"``, ``"pitman_yor"``, and ``"ansb"``.
+        Backward-compatible alias for ``estimator``. New code should use
+        ``estimator``; supplying both arguments raises :class:`ValueError`.
     sets_per_batch
-        Maximum number of variable sets evaluated together. The default is
-        intended to work well for routine global analyses.
+        Maximum number of generated variable sets per returned batch. Internal
+        estimators may reduce the working batch further to bound memory.
     device
         Optional Torch device on which calculations should be performed.
     local_values
-        If ``True``, also return sample-resolved values for all four measures.
-        Supported entropy estimators are empirical, Miller-Madow, Schürmann,
-        and Chao-Shen. Other estimators raise :class:`NotImplementedError`.
+        If ``True``, also return sample-resolved values for estimators that
+        define them.
     max_local_values_per_batch
         Memory-control target for local calculations, expressed as
-        ``variable sets × total samples``. With local values enabled, dTHOI
-        automatically reduces the effective ``sets_per_batch`` when the sample
-        count would otherwise make a generated batch too large.
+        ``variable sets × total samples``.
 
     Returns
     -------
     list[InteractionResults]
-        Results grouped into memory-sized pieces. Each item states the
-        interaction order, corresponding variable sets, and named information
-        measures. Local arrays, when requested, are moved to CPU with each
-        completed batch before the next batch is evaluated.
-
-    Notes
-    -----
-    Batching controls peak working and accelerator memory, not the total size of
-    the returned Python list. Exhaustive local analyses still scale with the
-    total number of variable sets times the number of samples. The same ANSB
-    marginal-regime limitation described in :func:`information_measures`
-    applies to exhaustive analyses.
+        Results grouped into bounded pieces. Each item states the interaction
+        order, variable sets, and named information measures.
     """
     prepared = prepare_discrete_data(data, device=device)
+    selected = resolve_public_estimator_argument(
+        estimator=estimator,
+        entropy_estimator=entropy_estimator,
+    )
 
     def collect(
         subsets: torch.Tensor,
@@ -416,7 +397,7 @@ def analyze_orders(
         prepared,
         min_order=min_order,
         max_order=max_order,
-        estimator=entropy_estimator,
+        estimator=selected,
         count_mode="auto",
         batch_size=sets_per_batch,
         batch_collector=collect,
