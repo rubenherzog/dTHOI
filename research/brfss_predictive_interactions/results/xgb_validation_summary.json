@@ -1,0 +1,8 @@
+{
+  "singleton_max_abs_delta_int": 0.0,
+  "additive_constraint_max_abs_mixed_second_difference": 3.0517578125e-05,
+  "full_model_max_abs_mixed_second_difference": 7.611711502075195,
+  "full12_R2_xgb_additive": 0.0404121299411747,
+  "full12_R2_xgb_full": 0.0409982903967706,
+  "full12_delta_int": 0.0005861604555958
+}
