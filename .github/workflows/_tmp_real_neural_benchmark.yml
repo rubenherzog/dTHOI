@@ -8,7 +8,7 @@ on:
 jobs:
   mc-maze-small:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,16 +25,16 @@ jobs:
           dandi download --download assets --path-type exact -o data \
             "dandi://dandi/000140@0.220113.0408/sub-Jenkins/sub-Jenkins_ses-small_desc-train_behavior+ecephys.nwb"
           find data -maxdepth 4 -type f -name '*.nwb' -ls
-      - name: Run direct-O extrapolation and block uncertainty
+      - name: Run scalable coherent O-information comparison
         run: |
           NWB_PATH="$(find data -type f -name '*.nwb' | head -n 1)"
           test -n "$NWB_PATH"
-          python benchmarks/benchmark_mc_maze_o_direct.py \
+          python benchmarks/benchmark_scalable_o_estimators.py \
             --nwb-path "$NWB_PATH" \
             --output-dir benchmark-results
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: mc-maze-o-direct-benchmark
+          name: scalable-coherent-o-benchmark
           path: benchmark-results
           if-no-files-found: warn
