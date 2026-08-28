@@ -72,6 +72,57 @@ def masks_from_subsets(subsets: torch.Tensor) -> list[int]:
     return _masks_from_canonical_subsets(canonicalize_subsets(subsets))
 
 
+def deduplicate_subsets(
+    subsets: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
+    """Deduplicate fixed-order variable sets while preserving first occurrence.
+
+    Parameters
+    ----------
+    subsets
+        Integer variable sets with shape ``[B, K]`` or one set ``[K]``.
+
+    Returns
+    -------
+    tuple
+        ``(unique_subsets, inverse, unique_masks)``. ``inverse`` maps each input
+        row to its corresponding row in ``unique_subsets``. Python-integer masks
+        are returned with the unique rows so callers can reuse the same exact
+        cache/counting keys without recomputing them.
+
+    Notes
+    -----
+    Python integers are intentionally used for the keys because the full dTHOI
+    data model allows hundreds of variables even when a selected interaction
+    order exceeds a single machine word.
+    """
+    canonical = canonicalize_subsets(subsets)
+    if canonical.shape[0] == 0:
+        inverse = torch.empty(0, dtype=torch.long, device=canonical.device)
+        return canonical, inverse, []
+
+    masks = _masks_from_canonical_subsets(canonical)
+    unique_rows: list[torch.Tensor] = []
+    unique_masks: list[int] = []
+    index_by_mask: dict[int, int] = {}
+    inverse_positions: list[int] = []
+
+    for mask, subset in zip(masks, canonical, strict=True):
+        index = index_by_mask.get(mask)
+        if index is None:
+            index = len(unique_rows)
+            index_by_mask[mask] = index
+            unique_rows.append(subset)
+            unique_masks.append(mask)
+        inverse_positions.append(index)
+
+    return (
+        torch.stack(unique_rows),
+        torch.tensor(inverse_positions, dtype=torch.long, device=canonical.device),
+        unique_masks,
+    )
+
+
 def mask_to_subset(mask: int) -> tuple[int, ...]:
     """Convert a non-negative Python integer bit mask back to variable indices."""
     if mask < 0:

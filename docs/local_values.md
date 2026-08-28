@@ -105,7 +105,7 @@ Its sample mean is exactly \(\widehat H_{CS}\). These values are Horvitz–Thomp
 
 ### Estimators without local values
 
-Shrinkage, fixed Pitman–Yor, and asymptotic NSB do not expose local values.
+Shrinkage, fixed Pitman–Yor, asymptotic NSB, and the coherent complete-joint estimators (`dirichlet_a1`, `dirichlet_eb`, and `nsb`) do not expose local values.
 
 For shrinkage, unobserved nominal states receive positive probability and contribute to the estimated entropy. The surprisal of an observed sample under the shrunken probabilities therefore averages to an empirical cross-entropy, not to the shrinkage entropy; recovering the latter would require an arbitrary allocation of the unseen-state contribution.
 
@@ -113,7 +113,9 @@ For fixed Pitman–Yor, the posterior mean entropy contains an explicit posterio
 
 Asymptotic NSB is a global coincidence-count estimator driven by the sample size and number of occupied states. An exact observation-level representation would amount to an arbitrary redistribution of the scalar estimate rather than a state-resolved entropy contribution.
 
-Local support is therefore an explicit estimator capability rather than an automatic consequence of providing a scalar entropy estimate.
+The coherent estimators use posterior-mean entropies under one complete-joint Dirichlet model. Their entropy expectations include contributions from unobserved joint and marginal states. Assigning those contributions to observed samples would require an additional pointwise convention that is not part of the estimator.
+
+Local support is therefore an explicit estimator capability rather than an automatic consequence of providing a scalar information estimate.
 
 ## Returned shapes
 
@@ -167,7 +169,7 @@ and exhaustive local analyses scale with the full number of variable combination
 
 ## Internal reuse
 
-Local values do not introduce independent TC, DTC, O-information, or S-information estimators. The implementation reuses the same state encodings, exact counts, entropy estimator, and entropy identities as the global path.
+Local values do not introduce independent TC, DTC, O-information, or S-information estimators. The implementation reuses the same state encodings, exact counts, entropy estimator, and entropy identities as the global entropy-composition path.
 
 Repeated singleton and leave-one-out entropy terms are deduplicated within each local measure batch, so a shared lower-order variable set is estimated once and scattered to every parent set that needs it.
 

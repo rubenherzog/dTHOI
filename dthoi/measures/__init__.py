@@ -1,4 +1,4 @@
-"""Higher-order information measures built from subset entropies."""
+"""Higher-order information measures for discrete multivariate data."""
 
 from .core import measures_from_provider, nplets_measures
 

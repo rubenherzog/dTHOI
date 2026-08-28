@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import TypeAlias
-
 import torch
 
 from ..data import DiscreteData, DiscreteInput
@@ -14,11 +12,19 @@ from ..subsets import (
     canonicalize_subsets,
     leave_one_out_subsets,
 )
-
-LocalMeasureValues: TypeAlias = tuple[torch.Tensor, ...]
-MeasureOutput: TypeAlias = torch.Tensor | tuple[torch.Tensor, LocalMeasureValues]
+from .definitions import (
+    LocalMeasureValues,
+    MeasureOutput,
+    combine_global_terms,
+    finish_measure_channels,
+)
 
 DEFAULT_MAX_LOCAL_VALUES_PER_BATCH = 1_000_000
+
+# Backward-compatible internal aliases. The definitions now live in one module
+# shared by entropy-composition and complete-joint estimators.
+_finish_measure_channels = finish_measure_channels
+_combine_global_terms = combine_global_terms
 
 
 def local_sets_per_batch(
@@ -47,26 +53,6 @@ def local_sets_per_batch(
         raise ValueError("max_local_values_per_batch must be positive.")
     total_samples = sum(data.sample_counts)
     return max(1, max_local_values_per_batch // total_samples)
-
-
-def _finish_measure_channels(values: torch.Tensor) -> None:
-    """Fill O-information and S-information from TC and DTC in place."""
-    values[..., 2] = values[..., 0] - values[..., 1]
-    values[..., 3] = values[..., 0] + values[..., 1]
-
-
-def _combine_global_terms(
-    h_joint: torch.Tensor,
-    h_single: torch.Tensor,
-    h_loo: torch.Tensor,
-    order: int,
-) -> torch.Tensor:
-    """Combine shared entropy terms into the four global information measures."""
-    values = torch.empty((*h_joint.shape, 4), dtype=torch.float64, device=h_joint.device)
-    values[..., 0] = h_single - h_joint
-    values[..., 1] = h_loo - (order - 1) * h_joint
-    _finish_measure_channels(values)
-    return values
 
 
 def _accumulate_local_entropy_terms(
@@ -202,9 +188,9 @@ def _measures_with_local_from_provider(
         max_local_values_per_batch=max_local_values_per_batch,
     )
 
-    _finish_measure_channels(values)
+    finish_measure_channels(values)
     for dataset_values in local_values:
-        _finish_measure_channels(dataset_values)
+        finish_measure_channels(dataset_values)
 
     return values, local_values
 
@@ -268,7 +254,7 @@ def measures_from_provider(
     loo_subsets = leave_one_out_subsets(subsets)
     h_loo = provider.entropy(loo_subsets).reshape(batch_size, order, -1).sum(dim=1)
 
-    return _combine_global_terms(h_joint, h_single, h_loo, order)
+    return combine_global_terms(h_joint, h_single, h_loo, order)
 
 
 def nplets_measures(
@@ -284,76 +270,19 @@ def nplets_measures(
 ) -> MeasureOutput:
     """Compute higher-order information measures for explicit variable sets.
 
-    This is an internal tensor-level function. Scientific users should normally
-    call :func:`dthoi.information_measures`.
-
-    Parameters
-    ----------
-    X
-        Discrete observations accepted by :func:`dthoi.prepare_data`.
-    subsets
-        Variable sets with shape ``[B, K]`` or one set ``[K]``.
-    estimator
-        Entropy estimator name or estimator instance.
-    count_mode
-        ``"dense"``, ``"sparse"``, or ``"auto"`` counting strategy.
-    cache
-        Optional entropy cache to reuse across calls.
-    device
-        Destination device for the observations.
-    local_values
-        Whether to also calculate sample-resolved TC, DTC, O-information, and
-        S-information.
-    max_local_values_per_batch
-        Target upper bound for ``variable sets × total samples`` during local
-        calculations. Explicit variable sets are subdivided automatically when
-        needed, then restored to their original order in the returned tensors.
-
-    Returns
-    -------
-    torch.Tensor or tuple
-        Global measures with shape ``[B, D, 4]``. If local values are requested,
-        also returns one ``[B, T_d, 4]`` tensor per dataset.
+    This compatibility entry point delegates estimator-family dispatch to the
+    common measure execution layer. Scientific users should normally call
+    :func:`dthoi.information_measures`.
     """
-    provider = CountingEntropyProvider(
+    from .dispatch import measures_for_sets
+
+    return measures_for_sets(
         X,
+        subsets,
         estimator=estimator,
         count_mode=count_mode,
         cache=cache,
         device=device,
+        local_values=local_values,
+        max_local_values_per_batch=max_local_values_per_batch,
     )
-    subsets = canonicalize_subsets(subsets, provider.data.n_variables).to(provider.data.device)
-
-    if not local_values:
-        return measures_from_provider(provider, subsets)
-
-    sets_per_batch = local_sets_per_batch(provider.data, max_local_values_per_batch)
-    values_out = torch.empty(
-        (subsets.shape[0], provider.data.n_datasets, 4),
-        dtype=torch.float64,
-        device=provider.data.device,
-    )
-    local_out = tuple(
-        torch.empty(
-            (subsets.shape[0], dataset.shape[0], 4),
-            dtype=torch.float64,
-            device=provider.data.device,
-        )
-        for dataset in provider.data.datasets
-    )
-
-    for start in range(0, subsets.shape[0], sets_per_batch):
-        stop = min(start + sets_per_batch, subsets.shape[0])
-        output = measures_from_provider(
-            provider,
-            subsets[start:stop],
-            local_values=True,
-            max_local_values_per_batch=max_local_values_per_batch,
-        )
-        assert isinstance(output, tuple)
-        values, local = output
-        values_out[start:stop] = values
-        for dataset_index, dataset_values in enumerate(local):
-            local_out[dataset_index][start:stop] = dataset_values
-
-    return values_out, local_out
